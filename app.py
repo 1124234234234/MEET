@@ -536,11 +536,49 @@ def get_meeting_status_detection():
 
 with app.app_context():
     db.create_all()
+    
+    # 确保uploads目录存在
+    if not os.path.exists(app.config['UPLOAD_FOLDER']):
+        os.makedirs(app.config['UPLOAD_FOLDER'])
 
     if not ScoreWeight.query.first():
         for name, value in app.config['SCORE_WEIGHTS'].items():
             weight = ScoreWeight(weight_name=name, weight_value=value)
             db.session.add(weight)
+        db.session.commit()
+    
+    # 初始化一些示例数据（如果知识库为空）
+    if not KnowledgeBase.query.first():
+        # 添加一些示例的政策文件
+        policy1 = KnowledgeBase(
+            title='公司会议规范',
+            content='所有公司会议必须遵循公司的价值观，尊重每一位参会者的意见，保持积极的工作态度。',
+            item_type='policy',
+            keywords=json.dumps(['规范', '价值观', '尊重']),
+            required_points=json.dumps([])
+        )
+        
+        # 添加风险关键词
+        risk_keywords = KnowledgeBase(
+            title='风险词汇表',
+            content='会议中应避免使用的负面或消极词汇。',
+            item_type='risk_keywords',
+            keywords=json.dumps(['消极', '反对', '抵制', '抱怨', '不满', '拒绝', '不行', '不可能', '做不到']),
+            required_points=json.dumps([])
+        )
+        
+        # 添加必传要点
+        key_points = KnowledgeBase(
+            title='项目例会要点',
+            content='项目例会必须包含的要点内容。',
+            item_type='key_points',
+            keywords=json.dumps(['进度', '问题', '计划', '目标']),
+            required_points=json.dumps(['进度汇报', '问题讨论', '下周计划', '风险说明'])
+        )
+        
+        db.session.add(policy1)
+        db.session.add(risk_keywords)
+        db.session.add(key_points)
         db.session.commit()
 
 if __name__ == '__main__':

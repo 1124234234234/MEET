@@ -354,9 +354,54 @@
         </div>
     </div>
 
+    <div class="modal" id="edit-kb-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="edit-kb-title">编辑知识库条目</h3>
+                <button class="modal-close" onclick="closeEditKbModal()">×</button>
+            </div>
+            <div id="edit-kb-body">
+                <div class="form-group">
+                    <label>标题</label>
+                    <input type="text" id="edit-kb-title-input">
+                </div>
+                <div class="form-group">
+                    <label>内容</label>
+                    <textarea id="edit-kb-content-input"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>类型</label>
+                    <select id="edit-kb-type-select">
+                        <option value="policy">政策文件</option>
+                        <option value="meeting_minutes">会议纪要</option>
+                        <option value="key_points">必传要点</option>
+                        <option value="risk_keywords">风险关键词</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>关键词 (逗号分隔)</label>
+                    <input type="text" id="edit-kb-keywords-input">
+                </div>
+                <div class="form-group">
+                    <label>必传要点 (逗号分隔)</label>
+                    <input type="text" id="edit-kb-points-input">
+                </div>
+                <div class="form-group">
+                    <label>状态</label>
+                    <select id="edit-kb-status-select">
+                        <option value="active">启用</option>
+                        <option value="inactive">禁用</option>
+                    </select>
+                </div>
+                <button class="btn btn-primary" onclick="saveEditKb()">保存</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const API_BASE = '/api';
         let currentFile = null;
+        let editingKbId = null;
 
         function showTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
@@ -862,6 +907,52 @@
             const result = await response.json();
             alert(result.message);
             loadKnowledgeList();
+        }
+
+        async function editKnowledge(id) {
+            editingKbId = id;
+            const response = await fetch(`${API_BASE}/knowledge-base/${id}`);
+            const result = await response.json();
+            const item = result.data;
+            
+            document.getElementById('edit-kb-title-input').value = item.title;
+            document.getElementById('edit-kb-content-input').value = item.content;
+            document.getElementById('edit-kb-type-select').value = item.item_type;
+            document.getElementById('edit-kb-keywords-input').value = item.keywords.join(', ');
+            document.getElementById('edit-kb-points-input').value = item.required_points.join(', ');
+            document.getElementById('edit-kb-status-select').value = item.status;
+            
+            document.getElementById('edit-kb-modal').classList.add('show');
+        }
+
+        function closeEditKbModal() {
+            document.getElementById('edit-kb-modal').classList.remove('show');
+            editingKbId = null;
+        }
+
+        async function saveEditKb() {
+            const data = {
+                title: document.getElementById('edit-kb-title-input').value,
+                content: document.getElementById('edit-kb-content-input').value,
+                item_type: document.getElementById('edit-kb-type-select').value,
+                keywords: document.getElementById('edit-kb-keywords-input').value.split(',').map(k => k.trim()).filter(k => k),
+                required_points: document.getElementById('edit-kb-points-input').value.split(',').map(k => k.trim()).filter(k => k),
+                status: document.getElementById('edit-kb-status-select').value
+            };
+            
+            try {
+                const response = await fetch(`${API_BASE}/knowledge-base/${editingKbId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const result = await response.json();
+                alert(result.message);
+                closeEditKbModal();
+                loadKnowledgeList();
+            } catch (error) {
+                alert('保存失败: ' + error.message);
+            }
         }
 
         async function loadReports() {
