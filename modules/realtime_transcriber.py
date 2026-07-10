@@ -305,7 +305,7 @@ def register_socketio_events(socketio, whisper_model):
 
     @socketio.on('stop_transcription')
     def handle_stop():
-        """停止转写，保存音频文件，并进行完整分析生成会议记录"""
+        """停止转写，保存音频文件，进行分析，并保存会议记录到数据库"""
         from flask import request
         sid = request.sid
 
@@ -318,9 +318,9 @@ def register_socketio_events(socketio, whisper_model):
             # 2. 获取最终转写结果
             result = transcriber.get_final_result()
             
-            # 3. 如果有音频文件，进行完整分析（音频预处理、说话人分离、关键词提取等）
+            # 3. 快速分析（跳过耗时步骤）
             if audio_file_path:
-                full_analysis = _perform_full_analysis(
+                full_analysis = _perform_fast_analysis(
                     audio_file_path,
                     transcriber.language,
                     transcriber.knowledge_items
@@ -332,9 +332,14 @@ def register_socketio_events(socketio, whisper_model):
             result['audio_file'] = audio_file_path
             result['audio_duration'] = len(transcriber.all_audio_data) * 0.1  # 估算时长
             
+            # 5. 保存会议记录到数据库
+            meeting_id = _save_meeting_to_db(result, audio_file_path, transcriber.knowledge_items)
+            if meeting_id:
+                result['meeting_id'] = meeting_id
+            
             socketio.emit('transcription_final', result, to=sid)
             del transcribers[sid]
-            print(f'Transcription finished for session {sid}, audio saved to {audio_file_path}')
+            print(f'Transcription finished for session {sid}, audio saved to {audio_file_path}, meeting_id={meeting_id}')
         else:
             socketio.emit('error', {'message': '没有活跃的转写会话'}, to=sid)
 
@@ -425,6 +430,137 @@ def _perform_full_analysis(audio_path, language, knowledge_items):
     
     except Exception as e:
         print(f'Full analysis failed: {e}')
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def _perform_fast_analysis(audio_path, language, knowledge_items):
+    """
+    快速分析（跳过耗时步骤）
+    不做音频预处理和说话人分离，直接使用原始音频转写
+    """
+    try:
+        from modules.text_analyzer import extract_keywords, analyze_topic, generate_summary, analyze_sentiment
+        from modules.compliance_checker import calculate_compliance_score, get_score_level
+
+        # 直接转写（不做音频预处理）
+        from app import whisper_model
+        full_result = whisper_model.transcribe(
+            audio_path,
+            language=language,
+            initial_prompt='以下是简体中文的语音转写内容，请使用简体中文输出。'
+        )
+        full_text = full_result['text']
+
+        # 生成转写段落（不做说话人分离）
+        transcriptions = []
+        for seg in full_result['segments']:
+            transcriptions.append({
+                'speaker': 'SPEAKER_00',
+                'text': seg['text'],
+                'start_time': seg['start'],
+                'end_time': seg['end'],
+                'confidence': seg.get('confidence', 0)
+            })
+
+        # 文本分析（关键词、主题、摘要、情绪）
+        keywords = extract_keywords(full_text, top_n=10)
+        topics = analyze_topic(full_text)
+        summary = generate_summary(full_text, max_length=300)
+        sentiment = analyze_sentiment(full_text)
+
+        # 合规分析（如果有知识库）
+        compliance_result = None
+        if knowledge_items:
+            compliance_result = calculate_compliance_score(
+                full_text,
+                knowledge_items,
+                transcription_segments=transcriptions
+            )
+            compliance_result['score_level'] = get_score_level(compliance_result['total_score'])
+
+        return {
+            'transcriptions': transcriptions,
+            'keywords': keywords,
+            'topics': topics,
+            'summary': summary,
+            'sentiment': sentiment,
+            'compliance': compliance_result,
+            'full_text': full_text
+        }
+
+    except Exception as e:
+        print(f'Fast analysis failed: {e}')
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def _save_meeting_to_db(result, audio_file_path, knowledge_items):
+    """
+    将会议记录保存到数据库
+    """
+    try:
+        from app import db
+        from models import Meeting, Transcription, ComplianceReport
+        from modules.compliance_checker import get_score_level
+        import json
+
+        # 创建会议记录
+        meeting = Meeting(
+            title=f'实时转写会议 {result.get("meeting_id", "")}',
+            audio_path=audio_file_path,
+            duration=int(result.get('audio_duration', 0)),
+            status='finished',
+            summary=result.get('summary', ''),
+            keywords=json.dumps(result.get('keywords', [])),
+            topics=json.dumps(result.get('topics', [])),
+            sentiment=json.dumps(result.get('sentiment', {}))
+        )
+        db.session.add(meeting)
+        db.session.commit()
+
+        # 保存转写段落
+        transcriptions = result.get('transcriptions', [])
+        if transcriptions:
+            for seg in transcriptions:
+                transcription = Transcription(
+                    meeting_id=meeting.id,
+                    speaker=seg.get('speaker', 'SPEAKER_00'),
+                    text=seg.get('text', ''),
+                    start_time=seg.get('start_time', 0),
+                    end_time=seg.get('end_time', 0),
+                    confidence=seg.get('confidence', 0.0),
+                    language='zh'
+                )
+                db.session.add(transcription)
+            db.session.commit()
+
+        # 保存合规报告
+        compliance = result.get('compliance')
+        if compliance:
+            report = ComplianceReport(
+                meeting_id=meeting.id,
+                total_score=compliance.get('total_score', 0),
+                score_level=compliance.get('score_level', ''),
+                detailed_scores=json.dumps(compliance.get('components', {})),
+                missing_points=json.dumps(compliance.get('missing_points', [])),
+                risk_keywords=json.dumps(compliance.get('risk_keywords_found', [])),
+                risk_time_markers=json.dumps(compliance.get('risk_time_markers', [])),
+                point_time_markers=json.dumps(compliance.get('point_time_markers', [])),
+                matched_keywords=json.dumps(compliance.get('matched_keywords', [])),
+                suggestions=json.dumps(compliance.get('suggestions', []))
+            )
+            db.session.add(report)
+            meeting.total_score = compliance.get('total_score', 0)
+            meeting.score_level = compliance.get('score_level', '')
+            db.session.commit()
+
+        return meeting.id
+
+    except Exception as e:
+        print(f'Save meeting to DB failed: {e}')
         import traceback
         traceback.print_exc()
         return None
