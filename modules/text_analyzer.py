@@ -232,31 +232,110 @@ def _is_low_quality_sentence(sentence):
     """判断句子是否为低质量（重复、无意义）"""
     if not sentence or len(sentence) < 5:
         return True
-    # 检测重复模式（如"我会我会我会"）
     if re.search(r'(.{2,})\1{2,}', sentence):
         return True
-    # 检测无意义的重复字（如"仪仪仪"）
     if re.search(r'(.)\1{3,}', sentence):
         return True
-    # 检测过度重复的短语
     words = jieba.lcut(sentence)
     unique_ratio = len(set(words)) / max(len(words), 1)
-    if unique_ratio < 0.3 and len(words) > 10:  # 重复度太高
+    if unique_ratio < 0.3 and len(words) > 10:
         return True
     return False
+
+
+def _convert_person(text):
+    """
+    将第一人称转换为第三人称，将对话式语气转换为叙述式
+    """
+    # 第一人称转换
+    text = text.replace('我', '发言者')
+    text = text.replace('我们', '会议')
+    text = text.replace('咱们', '参会人员')
+    
+    # 问候语和开场白过滤
+    greeting_patterns = [
+        r'大家好[，。！]',
+        r'各位同事[，。！]',
+        r'今天我们[来]?讨论',
+        r'今天我们[来]?开个会',
+        r'好的[，。]',
+        r'那么[，。]',
+        r'首先[，。]',
+        r'最后[，。]',
+        r'好的，今天的会议就到这里',
+        r'散会[，。！]',
+    ]
+    for pattern in greeting_patterns:
+        text = re.sub(pattern, '', text)
+    
+    # 语气词去除
+    text = re.sub(r'[呢吧啊哦嗯呀哈嘿]', '', text)
+    
+    # 去除多余标点和空白
+    text = re.sub(r'[，,]+', '，', text)
+    text = re.sub(r'[。.]+', '。', text)
+    text = re.sub(r'\s+', '', text)
+    
+    return text.strip()
+
+
+def _summarize_content(key_sentences):
+    """
+    真正的总结提炼：不是简单拼接，而是用第三人称叙述
+    """
+    if not key_sentences:
+        return ""
+    
+    # 转换为第三人称
+    converted = [_convert_person(s) for s in key_sentences]
+    converted = [s for s in converted if s and len(s) > 8]
+    
+    if not converted:
+        return ""
+    
+    # 提取关键信息点
+    info_points = []
+    
+    # 模式匹配提取
+    patterns = [
+        (r'(讨论|研究|审议|决定|批准|同意|否决|通过)\s+(.{2,20})', r'\1\2'),
+        (r'(要求|必须|应当|应该)\s+(.{2,30})', r'会议强调\2'),
+        (r'(提出|建议|提议)\s+(.{2,30})', r'会议提出\2'),
+        (r'(明确|确定|确认)\s+(.{2,20})', r'会议明确\2'),
+        (r'(汇报|报告|说明)\s+(.{2,30})', r'会议听取了\2的汇报'),
+        (r'(介绍|讲解)\s+(.{2,20})', r'参会人员介绍了\2'),
+        (r'(分析|评估|讨论)\s+(.{2,20})', r'会议分析了\2'),
+        (r'(达成|形成)\s+(共识|决议|意见)', r'会议\1\2'),
+    ]
+    
+    for sent in converted:
+        matched = False
+        for pattern, replacement in patterns:
+            match = re.search(pattern, sent)
+            if match:
+                info_points.append(match.expand(replacement))
+                matched = True
+                break
+        
+        if not matched and len(sent) <= 40:
+            info_points.append("会议提到：" + sent)
+    
+    # 去重
+    info_points = list(dict.fromkeys(info_points))
+    
+    return "；".join(info_points[:3])
 
 
 def generate_summary(text, max_length=500, language='zh'):
     """
     生成会议摘要：快速提炼会议重点信息
-    改进：结构化摘要，包含主题、要点、关键结论，过滤低质量句子
+    改进：第三人称叙述、真正的总结提炼、过滤对话语气
     """
     if not text or len(text.strip()) < 20:
         return "内容过短，无法生成摘要"
 
     # 1. 提取关键句（TextRank）
     key_sentences = extract_key_sentences(text, top_n=10, language=language)
-    # 过滤低质量句子
     key_sentences = [s for s in key_sentences if not _is_low_quality_sentence(s)]
 
     # 2. 提取关键词
@@ -270,6 +349,7 @@ def generate_summary(text, max_length=500, language='zh'):
 
     # 5. 识别会议动作项（需要做的事）
     action_items = extract_action_items(text, language=language)
+    action_items = [_convert_person(item) for item in action_items if _convert_person(item)]
 
     # 6. 组装结构化摘要
     summary_parts = []
@@ -285,10 +365,10 @@ def generate_summary(text, max_length=500, language='zh'):
         keyword_str = "、".join([kw['word'] for kw in keywords[:6]])
         summary_parts.append(f"核心议题包括：{keyword_str}")
 
-    # 主要内容（关键句）- 只取高质量的前3句
-    if key_sentences:
-        content = "；".join(key_sentences[:3])
-        summary_parts.append(f"主要内容：{content}")
+    # 主要内容（真正的总结提炼，不是原句拼接）
+    summarized_content = _summarize_content(key_sentences)
+    if summarized_content:
+        summary_parts.append(f"主要内容：{summarized_content}")
 
     # 动作项
     if action_items:
@@ -301,6 +381,10 @@ def generate_summary(text, max_length=500, language='zh'):
         summary_parts.append(f"整体氛围：{sentiment_desc}")
 
     summary = "。".join(summary_parts)
+
+    # 最后确保没有繁体字
+    from modules.whisper_utils import fix_traditional_chinese
+    summary = fix_traditional_chinese(summary)
 
     # 控制长度
     if len(summary) > max_length:

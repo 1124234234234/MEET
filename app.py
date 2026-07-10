@@ -145,21 +145,29 @@ def create_meeting():
     db.session.add(meeting)
     db.session.commit()
 
+    import time
+    start_time = time.time()
+
     init_whisper_model()
 
     try:
         from modules.whisper_utils import transcribe_with_fix
+
+        # 转写阶段
+        transcribe_start = time.time()
         result = transcribe_with_fix(whisper_model, processed_path, language='zh')
         full_text = result['text']
+        print(f"[TIMING] Transcription took: {time.time() - transcribe_start:.2f}s")
 
+        # 说话人分离阶段
+        speaker_segments = []
         if enable_diarization:
+            diarize_start = time.time()
             try:
                 speaker_segments = speaker_diarization_simple(processed_path)
             except Exception as e:
                 print(f'Speaker diarization failed: {e}')
-                speaker_segments = []
-        else:
-            speaker_segments = []
+            print(f"[TIMING] Speaker diarization took: {time.time() - diarize_start:.2f}s")
 
         for segment in result['segments']:
             speaker = 'SPEAKER_00'
