@@ -276,6 +276,23 @@ def create_meeting():
         db.session.commit()
         return jsonify({'code': 500, 'message': f'分析失败: {str(e)}'}), 500
 
+@app.route('/api/meetings/<int:meeting_id>', methods=['PUT'])
+def update_meeting(meeting_id):
+    meeting = Meeting.query.get_or_404(meeting_id)
+    
+    data = request.get_json()
+    
+    if 'title' in data:
+        meeting.title = data['title']
+    if 'summary' in data:
+        meeting.summary = data['summary']
+    if 'total_score' in data:
+        meeting.total_score = data['total_score']
+    
+    db.session.commit()
+    
+    return jsonify({'code': 200, 'message': '更新成功'})
+
 @app.route('/api/meetings/<int:meeting_id>', methods=['DELETE'])
 def delete_meeting(meeting_id):
     meeting = Meeting.query.get_or_404(meeting_id)

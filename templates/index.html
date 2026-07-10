@@ -340,6 +340,7 @@
                             <th>风险内容</th>
                             <th>建议</th>
                             <th>生成时间</th>
+                            <th>操作</th>
                         </tr>
                     </thead>
                     <tbody id="report-list"></tbody>
@@ -368,6 +369,34 @@
                 <button class="modal-close" onclick="closeModal()">×</button>
             </div>
             <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <div class="modal" id="edit-meeting-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>编辑会议信息</h3>
+                <button class="modal-close" onclick="closeEditMeetingModal()">×</button>
+            </div>
+            <div style="padding: 20px;">
+                <input type="hidden" id="edit-meeting-id">
+                <div class="form-group">
+                    <label>会议标题</label>
+                    <input type="text" id="edit-meeting-title" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label>会议摘要</label>
+                    <textarea id="edit-meeting-summary" class="form-control" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>合规评分</label>
+                    <input type="number" id="edit-meeting-score" class="form-control" min="0" max="100">
+                </div>
+                <div style="margin-top: 20px; display: flex; gap: 10px;">
+                    <button class="btn btn-primary" onclick="saveMeetingEdit()">保存</button>
+                    <button class="btn btn-secondary" onclick="closeEditMeetingModal()">取消</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -787,6 +816,47 @@
             return map[level] || 'pass';
         }
 
+        async function editMeeting(id) {
+            const response = await fetch(`${API_BASE}/meetings/${id}`);
+            const result = await response.json();
+            const data = result.data;
+
+            document.getElementById('edit-meeting-id').value = data.id;
+            document.getElementById('edit-meeting-title').value = data.title || '';
+            document.getElementById('edit-meeting-summary').value = data.summary || '';
+            document.getElementById('edit-meeting-score').value = data.total_score || '';
+
+            document.getElementById('edit-meeting-modal').style.display = 'block';
+        }
+
+        function closeEditMeetingModal() {
+            document.getElementById('edit-meeting-modal').style.display = 'none';
+        }
+
+        async function saveMeetingEdit() {
+            const id = document.getElementById('edit-meeting-id').value;
+            const data = {
+                title: document.getElementById('edit-meeting-title').value,
+                summary: document.getElementById('edit-meeting-summary').value,
+                total_score: parseFloat(document.getElementById('edit-meeting-score').value) || 0
+            };
+
+            const response = await fetch(`${API_BASE}/meetings/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            if (response.ok) {
+                alert('修改成功');
+                closeEditMeetingModal();
+                loadMeetingList();
+                loadReports();
+            } else {
+                alert('修改失败');
+            }
+        }
+
         async function loadMeetingList() {
             const response = await fetch(`${API_BASE}/meetings`);
             const result = await response.json();
@@ -803,6 +873,7 @@
                     <td>
                         <div class="actions">
                             <button class="btn btn-secondary" onclick="viewMeeting(${m.id})">查看</button>
+                            <button class="btn btn-primary" onclick="editMeeting(${m.id})">编辑</button>
                             <button class="btn btn-danger" onclick="deleteMeeting(${m.id})">删除</button>
                         </div>
                     </td>
@@ -1053,6 +1124,7 @@
                         <td>${m.compliance_report?.risk_keywords?.length || 0}</td>
                         <td>${m.compliance_report?.suggestions?.[0] || '--'}</td>
                         <td>${new Date(m.created_at).toLocaleString()}</td>
+                        <td><button class="btn btn-secondary btn-sm" onclick="viewMeetingDetail(${m.id})">查看详情</button></td>
                     </tr>
                 `;
             }).join('');
