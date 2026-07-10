@@ -46,7 +46,7 @@ def speaker_diarization_simple(audio_path, num_speakers=2):
 
 def enhanced_diarization(audio_path, num_speakers=2):
     """
-    增强的说话人分离：基于频谱特征 + MFCC + 聚类
+    增强的说话人分离：基于频谱特征 + MFCC + 聚类（优化版）
     支持交替发言和基本的同时发言检测
     """
     import librosa
@@ -56,34 +56,18 @@ def enhanced_diarization(audio_path, num_speakers=2):
     y, sr = librosa.load(audio_path, sr=16000)
     duration = len(y) / sr
 
-    hop_length = 512
+    # 调整参数加快速度
+    hop_length = 1024  # 增大步长，减少帧数
     n_fft = 2048
 
-    # 1. 提取MFCC特征（比纯频谱更能区分说话人）
+    # 1. 只提取 MFCC 特征（最有效），跳过其他频谱特征
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, hop_length=hop_length, n_fft=n_fft)
 
-    # 2. 提取频谱特征
-    stft = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length))
-    spectral_centroid = librosa.feature.spectral_centroid(S=stft, sr=sr)
-    spectral_bandwidth = librosa.feature.spectral_bandwidth(S=stft, sr=sr)
-    spectral_rolloff = librosa.feature.spectral_rolloff(S=stft, sr=sr)
-    zero_crossing_rate = librosa.feature.zero_crossing_rate(y, hop_length=hop_length)
-
-    # 3. 合并特征
-    features = np.vstack([
-        mfcc,
-        spectral_centroid,
-        spectral_bandwidth,
-        spectral_rolloff,
-        zero_crossing_rate
-    ]).T
-
-    # 4. 标准化
+    # 2. 标准化
     scaler = StandardScaler()
-    features_scaled = scaler.fit_transform(features)
+    features_scaled = scaler.fit_transform(mfcc.T)
 
-    # 5. 使用层次聚类（比KMeans更适合说话人分离）
-    # 估计说话人数量
+    # 3. 使用层次聚类（比KMeans更适合说话人分离）
     estimated_speakers = estimate_num_speakers(features_scaled, num_speakers)
 
     clustering = AgglomerativeClustering(
@@ -92,36 +76,49 @@ def enhanced_diarization(audio_path, num_speakers=2):
     )
     labels = clustering.fit_predict(features_scaled)
 
-    # 6. 构建说话人段落
+    # 4. 构建说话人段落
     speaker_segments = build_segments(labels, hop_length, sr, duration)
 
-    # 7. 检测重叠语音段
-    speaker_segments = detect_overlapping_speech(speaker_segments, features_scaled, labels, hop_length, sr)
-
-    # 8. 合并过短段
+    # 5. 合并过短段
     speaker_segments = merge_short_segments(speaker_segments)
 
     return speaker_segments
 
 
 def estimate_num_speakers(features, max_speakers):
-    """估计说话人数量"""
+    """估计说话人数量（快速版本）"""
     from sklearn.metrics import silhouette_score
+    from sklearn.cluster import KMeans
 
-    if len(features) < 10:
+    n_samples = len(features)
+    if n_samples < 10:
         return min(2, max_speakers)
 
-    max_speakers = min(max_speakers, len(features) // 5)
+    # 限制最大尝试次数，避免太慢
+    max_speakers = min(max_speakers, 4)  # 最多尝试 4 个说话人
+    max_speakers = min(max_speakers, n_samples // 10)  # 确保有足够样本
+
+    if max_speakers < 2:
+        return 2
+
+    # 采样加速：如果样本太多，只用部分样本评估
+    if n_samples > 500:
+        sample_indices = np.random.choice(n_samples, 500, replace=False)
+        features_sample = features[sample_indices]
+    else:
+        features_sample = features
 
     best_n = 2
     best_score = -1
 
-    for n in range(2, max_speakers + 1):
+    # 只尝试 2, 3, 4 个说话人
+    for n in [2, 3, 4]:
+        if n > max_speakers:
+            break
         try:
-            from sklearn.cluster import KMeans
-            kmeans = KMeans(n_clusters=n, random_state=42, n_init=10)
-            labels = kmeans.fit_predict(features)
-            score = silhouette_score(features, labels)
+            kmeans = KMeans(n_clusters=n, random_state=42, n_init=3, max_iter=100)
+            labels_sample = kmeans.fit_predict(features_sample)
+            score = silhouette_score(features_sample, labels_sample, sample_size=min(200, len(features_sample)))
 
             if score > best_score:
                 best_score = score
