@@ -98,8 +98,10 @@ class RealtimeTranscriber:
         try:
             sf.write(temp_path, audio, self.sr)
 
-            # Whisper转写
-            result = self.whisper_model.transcribe(
+            # Whisper转写（使用繁简修复）
+            from modules.whisper_utils import transcribe_with_fix
+            result = transcribe_with_fix(
+                self.whisper_model,
                 temp_path,
                 language=self.language,
                 task='transcribe'
@@ -444,13 +446,10 @@ def _perform_fast_analysis(audio_path, language, knowledge_items):
         from modules.text_analyzer import extract_keywords, analyze_topic, generate_summary, analyze_sentiment
         from modules.compliance_checker import calculate_compliance_score, get_score_level
 
-        # 直接转写（不做音频预处理）
+        # 直接转写（不做音频预处理，使用繁简修复）
         from app import whisper_model
-        full_result = whisper_model.transcribe(
-            audio_path,
-            language=language,
-            initial_prompt='以下是简体中文的语音转写内容，请使用简体中文输出。'
-        )
+        from modules.whisper_utils import transcribe_with_fix
+        full_result = transcribe_with_fix(whisper_model, audio_path, language=language)
         full_text = full_result['text']
 
         # 生成转写段落（不做说话人分离）

@@ -99,22 +99,26 @@ def create_meeting():
         return jsonify({'code': 400, 'message': 'File type not allowed'}), 400
     
     meeting_title = request.form.get('meeting_title', '未命名会议')
-    enable_diarization = request.form.get('enable_diarization', 'true').lower() == 'true'
+    enable_diarization = request.form.get('enable_diarization', 'false').lower() == 'true'
     enable_compliance = request.form.get('enable_compliance', 'true').lower() == 'true'
-    
+
     file_ext = audio_file.filename.rsplit('.', 1)[1].lower()
     file_id = str(uuid.uuid4())
     original_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{file_id}_original.{file_ext}')
     processed_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{file_id}_processed.wav')
-    
+
     audio_file.save(original_path)
-    
-    try:
-        preprocess_audio(original_path, processed_path)
-    except Exception as e:
-        print(f'Audio preprocessing failed: {e}')
+
+    # 音频预处理（可选，默认跳过以加快速度）
+    if enable_diarization:
+        try:
+            preprocess_audio(original_path, processed_path)
+        except Exception as e:
+            print(f'Audio preprocessing failed: {e}')
+            processed_path = original_path
+    else:
         processed_path = original_path
-    
+
     meeting = Meeting(
         title=meeting_title,
         date=datetime.now(),
@@ -123,15 +127,12 @@ def create_meeting():
     )
     db.session.add(meeting)
     db.session.commit()
-    
+
     init_whisper_model()
-    
+
     try:
-        result = whisper_model.transcribe(
-            processed_path,
-            language='zh',
-            initial_prompt='以下是简体中文的语音转写内容，请使用简体中文输出。'
-        )
+        from modules.whisper_utils import transcribe_with_fix
+        result = transcribe_with_fix(whisper_model, processed_path, language='zh')
         full_text = result['text']
 
         if enable_diarization:
@@ -171,12 +172,13 @@ def create_meeting():
         # 情绪分析
         sentiment = analyze_sentiment(full_text)
 
-        # 音频质量报告
+        # 音频质量报告（可选，默认跳过以加快速度）
         audio_quality = None
-        try:
-            audio_quality = get_audio_quality_report(original_path, processed_path)
-        except Exception as e:
-            print(f'Audio quality report failed: {e}')
+        if enable_diarization:
+            try:
+                audio_quality = get_audio_quality_report(original_path, processed_path)
+            except Exception as e:
+                print(f'Audio quality report failed: {e}')
 
         meeting.duration = int(result['segments'][-1]['end']) if result['segments'] else 0
         # 保存会议梗概信息到数据库
