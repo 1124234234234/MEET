@@ -10,21 +10,32 @@ class Meeting(db.Model):
     audio_path = db.Column(db.String(500))
     total_score = db.Column(db.Float)
     score_level = db.Column(db.String(20))
+    # 会议梗概信息（文本分析结果）
+    summary = db.Column(db.Text)
+    keywords = db.Column(db.Text)
+    topics = db.Column(db.Text)
+    sentiment = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, onupdate=datetime.now)
-    
+
     transcriptions = db.relationship('Transcription', backref='meeting', lazy=True)
     compliance_report = db.relationship('ComplianceReport', backref='meeting', uselist=False)
-    
+
     def to_dict(self):
+        import json
         return {
             'id': self.id,
             'title': self.title,
             'date': self.date.isoformat(),
             'duration': int(self.duration) if self.duration else 0,
             'status': self.status,
+            'audio_path': self.audio_path,
             'total_score': float(self.total_score) if self.total_score else None,
             'score_level': self.score_level,
+            'summary': self.summary or '',
+            'keywords': json.loads(self.keywords) if self.keywords else [],
+            'topics': json.loads(self.topics) if self.topics else [],
+            'sentiment': json.loads(self.sentiment) if self.sentiment else {},
             'created_at': self.created_at.isoformat()
         }
 

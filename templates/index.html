@@ -114,15 +114,32 @@
 
             <div class="card">
                 <div class="card-title">🎙️ 实时语音转写</div>
-                <div style="display:flex; gap:12px; align-items:center; margin-bottom:16px;">
+                <div style="display:flex; gap:12px; align-items:center; margin-bottom:12px; flex-wrap:wrap;">
                     <button class="btn btn-primary" id="realtime-start-btn" onclick="startRealtime()">开始实时转写</button>
                     <button class="btn btn-danger" id="realtime-stop-btn" onclick="stopRealtime()" disabled>停止转写</button>
-                    <button class="btn btn-secondary" onclick="detectMeetingStatus()">检测会议状态</button>
                     <span id="realtime-status" style="color:#999;">未连接</span>
                     <span id="recording-indicator" style="display:none; color:#ff4d4f;">● 录音中</span>
                 </div>
+                <div style="display:flex; gap:12px; align-items:center; margin-bottom:16px;">
+                    <label style="font-size:14px; color:#666;">麦克风:</label>
+                    <select id="mic-select" style="padding:6px 12px; border-radius:6px; border:1px solid #ddd; font-size:14px; min-width:200px;">
+                        <option value="">使用默认麦克风</option>
+                    </select>
+                    <button class="btn btn-sm btn-secondary" onclick="refreshMicList()" style="padding:6px 12px; font-size:12px;">刷新列表</button>
+                </div>
                 <div id="realtime-transcription" style="background:#f8f9fa; border-radius:8px; padding:16px; min-height:100px; max-height:300px; overflow-y:auto; font-size:14px; line-height:1.8;">
                     <span style="color:#999;">点击"开始实时转写"，系统将实时把语音转写为文字...</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">🔍 会议状态检测</div>
+                <div style="display:flex; gap:12px; align-items:center; margin-bottom:16px;">
+                    <button class="btn btn-secondary" onclick="detectMeetingStatus()">检测会议状态</button>
+                    <span style="font-size:12px; color:#999;">检测当前环境是否有语音活动（约5秒）</span>
+                </div>
+                <div id="meeting-status-result" style="background:#f8f9fa; border-radius:8px; padding:16px; min-height:60px; font-size:14px; line-height:1.8;">
+                    <span style="color:#999;">点击"检测会议状态"查看当前环境语音活动情况...</span>
                 </div>
             </div>
 
@@ -690,8 +707,13 @@
                     console.error('Socket error:', data);
                 });
 
-                // 获取麦克风权限
-                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // 获取麦克风权限（使用用户选择的麦克风）
+                const micSelect = document.getElementById('mic-select');
+                const selectedDeviceId = micSelect ? micSelect.value : '';
+                const constraints = selectedDeviceId
+                    ? { audio: { deviceId: { exact: selectedDeviceId } } }
+                    : { audio: true };
+                mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
                 audioContext = new AudioContext({ sampleRate: 16000 });
 
                 // 使用ScriptProcessor采集音频
@@ -792,15 +814,59 @@
             const response = await fetch(`${API_BASE}/meetings/${id}`);
             const result = await response.json();
             const data = result.data;
-            
+
             document.getElementById('modal-title').textContent = data.title;
+
+            // 构建梗概信息 HTML
+            let overviewHtml = '';
+            if (data.summary) {
+                overviewHtml += `
+                    <div style="margin-bottom:16px; padding:12px; background:#f0f5ff; border-radius:8px; border-left:4px solid #1890ff;">
+                        <h4 style="margin-bottom:8px; color:#1890ff;">📋 会议梗概</h4>
+                        <p style="line-height:1.8;">${data.summary}</p>
+                    </div>
+                `;
+            }
+            if (data.keywords && data.keywords.length > 0) {
+                overviewHtml += `
+                    <div style="margin-bottom:16px;">
+                        <h4 style="margin-bottom:8px;">🔑 关键词</h4>
+                        <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                            ${data.keywords.map(kw => `<span style="background:#e6f7ff; color:#1890ff; padding:4px 10px; border-radius:12px; font-size:13px;">${typeof kw === 'object' ? kw.word : kw}</span>`).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+            if (data.topics && data.topics.length > 0) {
+                overviewHtml += `
+                    <div style="margin-bottom:16px;">
+                        <h4 style="margin-bottom:8px;">📊 讨论主题</h4>
+                        <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                            ${data.topics.map(t => `<span style="background:#f6ffed; color:#52c41a; padding:4px 10px; border-radius:12px; font-size:13px;">${typeof t === 'object' ? t.topic : t}</span>`).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+            if (data.sentiment && Object.keys(data.sentiment).length > 0) {
+                const sentiment = data.sentiment;
+                const sentimentColor = sentiment.sentiment === 'positive' ? '#52c41a' : sentiment.sentiment === 'negative' ? '#ff4d4f' : '#999';
+                const sentimentText = sentiment.sentiment === 'positive' ? '积极' : sentiment.sentiment === 'negative' ? '消极' : '中性';
+                overviewHtml += `
+                    <div style="margin-bottom:16px;">
+                        <h4 style="margin-bottom:8px;">😊 情绪分析</h4>
+                        <p>整体情绪: <span style="color:${sentimentColor}; font-weight:bold;">${sentimentText}</span> (得分: ${sentiment.score || 0})</p>
+                    </div>
+                `;
+            }
+
             document.getElementById('modal-body').innerHTML = `
                 <div style="margin-bottom:20px;">
                     <h4>基本信息</h4>
                     <p>日期: ${new Date(data.date).toLocaleString()}</p>
                     <p>时长: ${Math.round(data.duration / 60)}分钟</p>
-                    <p>状态: ${data.status}</p>
+                    <p>状态: ${data.status === 'finished' ? '已完成' : data.status}</p>
                 </div>
+                ${overviewHtml}
                 <div style="margin-bottom:20px;">
                     <h4>转写内容</h4>
                     ${data.transcriptions.map(t => `
@@ -808,10 +874,18 @@
                     `).join('')}
                 </div>
                 ${data.compliance_report ? `
-                    <div>
+                    <div style="margin-bottom:20px;">
                         <h4>合规报告</h4>
-                        <p>评分: ${data.compliance_report.total_score} (${data.compliance_report.score_level})</p>
+                        <p><strong>评分: ${data.compliance_report.total_score} (${data.compliance_report.score_level})</strong></p>
                         <p>建议: ${data.compliance_report.suggestions.join(', ')}</p>
+                        ${data.compliance_report.risk_time_markers && data.compliance_report.risk_time_markers.length > 0 ? `
+                            <div style="margin-top:8px;">
+                                <p style="color:#ff4d4f;">⚠ 风险内容时间节点:</p>
+                                ${data.compliance_report.risk_time_markers.map(m => `
+                                    <p style="font-size:13px; color:#666;">${formatTime(m.start_time)} - ${m.keyword}: ${m.text}</p>
+                                `).join('')}
+                            </div>
+                        ` : ''}
                     </div>
                 ` : ''}
             `;
@@ -1102,30 +1176,75 @@
         }
 
         async function detectMeetingStatus() {
-            const el = document.getElementById('realtime-transcription');
-            el.innerHTML += `<div style="background:#e6f7ff; padding:8px; border-left:4px solid #1890ff; margin-bottom:8px; font-size:13px;">
+            const el = document.getElementById('meeting-status-result');
+            el.innerHTML = `<div style="background:#e6f7ff; padding:10px 14px; border-radius:6px; font-size:13px;">
                 📡 正在检测会议状态，请等待5秒...
             </div>`;
-            
+
             try {
                 const response = await fetch(`${API_BASE}/meeting-status`);
                 const result = await response.json();
+
+                if (result.code !== 200 || !result.data) {
+                    el.innerHTML = `<div style="background:#fff1f0; padding:10px 14px; border-radius:6px; color:#ff4d4f; font-size:13px;">
+                        ⚠ 检测失败: ${result.message || '未知错误'}
+                    </div>`;
+                    return;
+                }
+
                 const data = result.data;
-                
                 const statusText = data.is_speech_detected ? '检测到语音活动，建议开始录制' : '当前环境安静，继续监控';
-                const statusColor = data.is_speech_detected ? '#52c41a' : '#999';
-                
-                el.innerHTML += `<div style="background:${data.is_speech_detected ? '#f6ffed' : '#fffbe6'}; padding:8px; border-left:4px solid ${statusColor}; margin-bottom:8px; font-size:13px;">
-                    🎤 音频音量: ${(data.audio_level * 1000).toFixed(2)}%
-                    <br>📊 语音检测: ${data.is_speech_detected ? '<span style="color:#52c41a;">✓ 检测到</span>' : '<span style="color:#999;">✗ 未检测</span>'}
-                    <br>💡 建议: ${statusText}
-                </div>`;
+                const statusColor = data.is_speech_detected ? '#52c41a' : '#faad14';
+                const bgColor = data.is_speech_detected ? '#f6ffed' : '#fffbe6';
+
+                // 音量转换为可读格式（dB）
+                const dbText = data.audio_level_db !== undefined
+                    ? `${data.audio_level_db} dB`
+                    : `${(data.audio_level * 100).toFixed(1)}%`;
+
+                el.innerHTML = `
+                    <div style="background:${bgColor}; padding:12px 14px; border-radius:6px; border-left:4px solid ${statusColor}; font-size:13px; line-height:1.8;">
+                        <div><strong>🎤 音频音量:</strong> ${dbText}</div>
+                        <div><strong>📊 语音检测:</strong> ${data.is_speech_detected ? '<span style="color:#52c41a;">✓ 检测到语音</span>' : '<span style="color:#999;">✗ 未检测到</span>'}</div>
+                        <div><strong>💡 建议:</strong> ${statusText}</div>
+                    </div>
+                `;
             } catch (error) {
-                el.innerHTML += `<div style="background:#fff1f0; padding:8px; border-left:4px solid #ff4d4f; margin-bottom:8px; font-size:13px;">
+                el.innerHTML = `<div style="background:#fff1f0; padding:10px 14px; border-radius:6px; color:#ff4d4f; font-size:13px;">
                     ⚠ 检测失败: ${error.message}
                 </div>`;
             }
         }
+
+        // 刷新麦克风列表
+        async function refreshMicList() {
+            const select = document.getElementById('mic-select');
+            select.innerHTML = '<option value="">使用默认麦克风</option>';
+
+            try {
+                // 先请求权限，否则设备标签可能为空
+                await navigator.mediaDevices.getUserMedia({ audio: true });
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const audioInputs = devices.filter(d => d.kind === 'audioinput');
+
+                audioInputs.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.textContent = device.label || `麦克风 ${index + 1}`;
+                    select.appendChild(option);
+                });
+
+                if (audioInputs.length === 0) {
+                    select.innerHTML = '<option value="">未找到麦克风</option>';
+                }
+            } catch (err) {
+                console.error('获取麦克风列表失败:', err);
+                select.innerHTML = '<option value="">无法获取麦克风列表（请授权麦克风权限）</option>';
+            }
+        }
+
+        // 页面加载时自动刷新麦克风列表
+        document.addEventListener('DOMContentLoaded', refreshMicList);
 
         function exportMeetingReport(meetingId) {
             window.open(`${API_BASE}/reports/meeting-summary/${meetingId}`, '_blank');

@@ -179,6 +179,11 @@ def create_meeting():
             print(f'Audio quality report failed: {e}')
 
         meeting.duration = int(result['segments'][-1]['end']) if result['segments'] else 0
+        # 保存会议梗概信息到数据库
+        meeting.summary = summary
+        meeting.keywords = json.dumps(keywords)
+        meeting.topics = json.dumps(topics)
+        meeting.sentiment = json.dumps(sentiment)
 
         compliance_result = None
         if enable_compliance:
@@ -512,21 +517,52 @@ def get_compliance_trend_report():
 def get_meeting_status_detection():
     import sounddevice as sd
     import numpy as np
-    
+
     try:
         duration = 5
         fs = 16000
-        
+
         audio_data = sd.rec(int(duration * fs), samplerate=fs, channels=1)
         sd.wait()
-        
-        rms = np.sqrt(np.mean(audio_data ** 2))
+
+        # 安全检查：确保数据有效
+        if audio_data is None or len(audio_data) == 0:
+            return jsonify({
+                'code': 200,
+                'data': {
+                    'audio_level': 0.0,
+                    'audio_level_db': -100.0,
+                    'is_speech_detected': False,
+                    'suggested_action': 'monitoring'
+                }
+            })
+
+        # 计算 RMS，处理异常值
+        squared = np.square(audio_data.astype(np.float64))
+        mean_sq = np.mean(squared)
+
+        # 防止除零和无效值
+        if not np.isfinite(mean_sq) or mean_sq <= 0:
+            rms = 0.0
+            db = -100.0
+        else:
+            rms = float(np.sqrt(mean_sq))
+            # 转换为分贝
+            db = 20.0 * np.log10(rms + 1e-10)
+
+        # 再次检查是否为有效数值
+        if not np.isfinite(rms):
+            rms = 0.0
+        if not np.isfinite(db):
+            db = -100.0
+
         is_speech = rms > 0.03
-        
+
         return jsonify({
             'code': 200,
             'data': {
-                'audio_level': float(rms),
+                'audio_level': round(rms, 6),
+                'audio_level_db': round(float(db), 2),
                 'is_speech_detected': bool(is_speech),
                 'suggested_action': 'start_recording' if is_speech else 'monitoring'
             }
