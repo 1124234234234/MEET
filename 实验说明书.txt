@@ -1,0 +1,261 @@
+AI语音识别与翻译系统 实验说明书
+
+实验目的：
+1. 了解基于OpenAI Whisper的语音识别技术原理
+2. 掌握RESTful API服务的开发与部署方法
+3. 熟悉Python Flask框架的使用
+4. 掌握音频文件处理与语言检测技术
+
+一、项目概述
+
+本项目是一个基于OpenAI Whisper的语音识别API服务，支持自动语言检测，并可将识别结果翻译成目标语言。
+
+技术栈：
+- 后端：Python 3.10+ / Flask 3.1+
+- 语音识别：OpenAI Whisper (medium模型)
+- 翻译：Helsinki-NLP/opus-mt (transformers)
+- 前端：HTML5 / JavaScript
+- 音频处理：FFmpeg
+
+功能特性：
+- 自动检测音频语言（支持中、英、日、韩、法、德、西、俄、阿、葡等10+种语言）
+- 支持中文与英文互译
+- 提供RESTful API接口，方便集成到其他系统
+- 内置Web Demo页面，上传音频即可试用
+
+二、环境要求
+
+硬件要求：
+- CPU：多核处理器（推荐Intel i5及以上）
+- 内存：至少8GB（Whisper medium模型约占4GB）
+- 磁盘：至少10GB可用空间（模型文件约2GB）
+
+软件要求：
+- Python 3.10+
+- FFmpeg（音频处理工具）
+- Git（可选，用于克隆仓库）
+
+三、安装与启动
+
+步骤1：检查Python版本
+打开终端，执行命令：
+python --version
+确保显示 Python 3.10 或更高版本。
+
+步骤2：安装依赖包
+进入项目目录 voice-reco，执行命令：
+pip install openai-whisper flask flask-cors transformers torch -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+步骤3：检查FFmpeg
+执行命令：
+ffmpeg -version
+确保显示FFmpeg版本信息。
+
+步骤4：启动服务
+执行命令：
+python app.py
+
+启动成功后会显示：
+==================================================
+  AI Voice Recognition & Translation API
+==================================================
+Initializing Whisper model...
+Whisper medium model loaded successfully
+
+Ready to accept requests on 0.0.0.0:5000
+ * Running on http://127.0.0.1:5000
+
+步骤5：验证服务
+打开浏览器访问 http://localhost:5000，或在终端执行：
+Invoke-RestMethod http://localhost:5000/health
+预期返回：{"status":"ok","message":"API service is running"}
+
+四、项目文件结构
+
+voice-reco/
+├── app.py              Flask API服务主程序
+├── index.html          Web Demo页面
+├── requirements.txt    Python依赖包列表
+├── Dockerfile          Docker镜像构建文件
+├── start.bat           Windows一键部署脚本
+└── README.md          项目说明文档
+
+关键文件说明：
+
+app.py：
+- 第13-24行：支持的语言映射表
+- 第30-41行：Whisper模型初始化函数
+- 第44-67行：翻译模型加载函数
+- 第70-72行：健康检查接口
+- 第75-131行：语音识别主接口
+- 第134-136行：获取支持语言列表接口
+
+index.html：
+- 提供Web界面，支持上传音频文件
+- 支持选择目标语言进行翻译
+- 显示识别结果和翻译结果
+
+五、API接口说明
+
+接口1：健康检查
+地址：GET http://localhost:5000/health
+功能：检查服务是否正常运行
+请求参数：无
+响应示例：
+{"status":"ok","message":"API service is running"}
+
+接口2：获取支持语言
+地址：GET http://localhost:5000/languages
+功能：获取系统支持的所有语言列表
+请求参数：无
+响应示例：
+{"zh":"Chinese","en":"English","ja":"Japanese","ko":"Korean",...}
+
+接口3：语音识别
+地址：POST http://localhost:5000/transcribe
+功能：上传音频文件进行语音识别，可选翻译
+请求参数：
+- audio：音频文件（必填，支持wav、mp3、ogg等格式）
+- target_language：目标语言代码（可选，如en、zh）
+响应示例：
+{
+  "transcribed_text": "你好，世界",
+  "detected_language": "zh",
+  "language_name": "Chinese",
+  "translated_text": "Hello, world",
+  "target_language": "en"
+}
+
+六、实验任务
+
+实验1：基础语音识别
+任务描述：
+1. 准备一个中文语音文件（如.wav格式）
+2. 使用Web界面上传文件进行识别
+3. 记录识别结果和检测到的语言
+
+操作步骤：
+1. 打开浏览器访问 http://localhost:5000
+2. 点击"音频文件输入"选择本地音频文件
+3. 目标语言选择"-- 不翻译 --"
+4. 点击"开始转录"按钮
+5. 等待处理完成，查看识别结果
+
+实验2：语言检测
+任务描述：
+1. 准备不同语言的语音文件（中文、英文、日文等）
+2. 测试系统能否正确识别语言
+
+操作步骤：
+1. 分别上传不同语言的音频文件
+2. 记录每次检测到的语言名称
+3. 验证检测结果是否正确
+
+实验3：语音翻译
+任务描述：
+1. 上传中文语音文件，选择目标语言为英文
+2. 上传英文语音文件，选择目标语言为中文
+3. 验证翻译功能是否正常
+
+操作步骤：
+1. 上传中文音频，目标语言选择"English"
+2. 查看识别结果和翻译结果
+3. 上传英文音频，目标语言选择"中文"
+4. 查看识别结果和翻译结果
+
+实验4：API接口测试
+任务描述：
+1. 使用命令行工具调用API接口
+2. 测试不同参数的效果
+
+操作步骤：
+1. 测试健康检查接口：
+   Invoke-RestMethod http://localhost:5000/health
+2. 测试语言列表接口：
+   Invoke-RestMethod http://localhost:5000/languages
+3. 测试语音识别接口（Windows PowerShell）：
+   curl -X POST http://localhost:5000/transcribe -F "audio=@test.wav"
+
+实验5：模型性能对比
+任务描述：
+1. 修改app.py中的模型参数，测试不同模型的效果
+2. 比较tiny、base、small、medium模型的识别准确率和速度
+
+操作步骤：
+1. 打开app.py文件，找到第35行
+2. 将"medium"改为"small"，保存文件
+3. 重启服务，上传相同音频文件测试
+4. 记录识别时间和准确率
+5. 依次测试base、tiny模型
+
+七、常见问题与解决方法
+
+问题1：服务启动时报错"out of memory"
+解决方法：
+- 关闭其他占用内存的程序
+- 将模型改为small或base（占用内存更小）
+
+问题2：音频文件无法识别
+解决方法：
+- 确保音频格式为wav、mp3或ogg
+- 确保音频文件没有损坏
+- 尝试使用其他音频文件测试
+
+问题3：翻译功能不工作
+解决方法：
+- 确认网络连接正常（首次使用需要下载翻译模型）
+- 目前仅支持中文↔英文互译
+
+问题4：服务无法启动
+解决方法：
+- 检查端口5000是否被其他程序占用
+- 执行 netstat -ano | findstr :5000 查看占用情况
+- 使用 taskkill /F /PID <进程号> 关闭占用进程
+
+八、扩展任务
+
+任务1：添加新的翻译语言对
+修改app.py中的get_translator函数，添加其他语言的翻译模型。
+
+任务2：添加实时语音识别
+修改index.html，使用Web Speech API实现麦克风实时录音和识别。
+
+任务3：添加批量处理功能
+修改app.py，支持一次上传多个音频文件进行批量处理。
+
+任务4：添加结果保存功能
+修改app.py，将识别结果保存到本地文件或数据库。
+
+九、参考文献
+
+1. OpenAI Whisper官方文档：https://github.com/openai/whisper
+2. Flask官方文档：https://flask.palletsprojects.com/
+3. Transformers官方文档：https://huggingface.co/docs/transformers/
+4. FFmpeg官方网站：https://ffmpeg.org/
+
+十、附录
+
+支持的语言代码表：
+zh - Chinese（中文）
+en - English（英文）
+ja - Japanese（日文）
+ko - Korean（韩文）
+fr - French（法文）
+de - German（德文）
+es - Spanish（西班牙文）
+ru - Russian（俄文）
+ar - Arabic（阿拉伯文）
+pt - Portuguese（葡萄牙文）
+
+Whisper模型参数说明：
+tiny - 约74MB，速度最快，准确率最低
+base - 约146MB，速度较快，准确率较低
+small - 约468MB，速度适中，准确率较高
+medium - 约1.5GB，速度较慢，准确率很高
+large-v3-turbo - 约1.5GB，速度较慢，准确率最高
+
+服务控制命令：
+启动服务：python app.py
+停止服务：Ctrl+C（在终端中）
+查看端口占用：netstat -ano | findstr :5000
+关闭占用进程：taskkill /F /PID <进程号>

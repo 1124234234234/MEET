@@ -1,0 +1,878 @@
+会议智能分析系统 技术文档
+
+文档版本：v1.0
+创建日期：2026-07-09
+适用范围：会议音频分析与合规比对系统
+
+目录
+一、需求分析
+二、系统架构设计
+三、技术选型
+四、功能模块详细设计
+五、数据库设计
+六、API接口设计
+七、部署方案
+八、安全性考虑
+九、性能优化方案
+
+一、需求分析
+
+1.1 业务背景
+
+本系统是基于语音识别技术的会议智能分析平台，核心目标是实现会议内容的自动转写、分析和合规校验，提升会议管理效率和质量把控能力。
+
+1.2 功能需求
+
+根据需求文档，系统主要包含两大核心功能模块：
+
+1.2.1 音频分析功能
+
+- 实时语音转写：将会议全程语音实时转写为文字
+- 说话人分离：支持多人同时发言、交替发言场景，区分不同人员发言内容
+- 关键词提取：自动抓取会议中的核心关键词和高频讨论内容
+- 主题分析：对全文内容进行语义分析，识别讨论主题和核心方向
+- 音频预处理：自动完成降噪、回声消除和语音增强
+
+1.2.2 合规比对功能
+
+- 知识库管理：后台支持管理人员维护会议文件知识库
+- 文件录入：可录入、修改、更新各类会议文件、会议精神、强制传达要点及管控关键词
+- 动态维护：根据政策迭代情况动态维护知识库内容
+- 语义相似度比对：实时将语音转写内容与政策知识库进行语义相似度比对
+- 要点核查：逐条核查既定必传要点，自动识别未覆盖、未提及的内容
+- 合规评分：自动生成0-100分合规评分，评分权重支持自定义配置
+- 风险识别：识别偏离主题、表述不当、消极负面等风险内容
+
+1.3 非功能需求
+
+- 准确性：语音识别准确率≥95%，语义分析准确率≥90%
+- 实时性：语音转写延迟≤3秒，合规比对延迟≤5秒
+- 可靠性：系统可用性≥99.5%
+- 扩展性：支持至少100人并发会议分析
+
+二、系统架构设计
+
+2.1 整体架构
+
+采用分层架构设计，分为表示层、应用层、业务逻辑层和数据层。
+
+┌─────────────────────────────────────────────────────┐
+│                    表示层                            │
+│              (Web前端、管理后台)                      │
+├─────────────────────────────────────────────────────┤
+│                    应用层                            │
+│         (API网关、认证授权、请求路由)                  │
+├─────────────────────────────────────────────────────┤
+│                    业务逻辑层                         │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐    │
+│  │ 音频预处理  │ │ 语音识别    │ │ 语义分析    │    │
+│  │ 模块        │ │ 模块        │ │ 模块        │    │
+│  └─────────────┘ └─────────────┘ └─────────────┘    │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐    │
+│  │ 说话人分离  │ │ 知识库管理  │ │ 合规比对    │    │
+│  │ 模块        │ │ 模块        │ │ 模块        │    │
+│  └─────────────┘ └─────────────┘ └─────────────┘    │
+├─────────────────────────────────────────────────────┤
+│                    数据层                            │
+│       (MySQL、Redis、文件存储、模型缓存)              │
+└─────────────────────────────────────────────────────┘
+
+2.2 核心流程图
+
+2.2.1 音频分析流程
+
+会议音频输入 → 音频预处理(降噪/回声消除) → 语音识别转写 → 说话人分离 → 关键词提取 → 主题分析 → 结果输出
+
+2.2.2 合规比对流程
+
+语音转写结果 → 语义相似度计算 → 要点覆盖检查 → 风险内容识别 → 合规评分计算 → 生成合规报告
+
+三、技术选型
+
+3.1 后端技术
+
+| 分类 | 技术 | 版本 | 选型理由 |
+|------|------|------|----------|
+| 语言 | Python | 3.10+ | 成熟的AI生态，丰富的语音处理库 |
+| 框架 | Flask | 3.1+ | 轻量灵活，便于快速开发API服务 |
+| 语音识别 | OpenAI Whisper | 20250625 | 多语言支持，高准确率，开源免费 |
+| 说话人分离 | pyannote.audio | 3.1+ | 基于PyTorch的说话人识别框架 |
+| 语义分析 | Transformers | 5.x | HuggingFace生态，丰富的预训练模型 |
+| 关键词提取 | RAKE | 1.4+ | 快速自动关键词提取算法 |
+| 音频处理 | librosa | 0.10+ | 专业音频分析处理库 |
+| 数据库 | MySQL | 8.0+ | 稳定可靠，支持复杂查询 |
+| 缓存 | Redis | 7.0+ | 高性能缓存，支持实时数据处理 |
+
+3.2 前端技术
+
+| 分类 | 技术 | 版本 | 选型理由 |
+|------|------|------|----------|
+| 框架 | Vue.js | 3.x | 响应式设计，组件化开发 |
+| UI组件 | Element Plus | 2.x | 丰富的组件库，美观易用 |
+| 图表 | ECharts | 5.x | 强大的数据可视化能力 |
+| 语音录制 | Web Audio API | - | 浏览器原生支持，无需插件 |
+
+3.3 基础设施
+
+| 分类 | 技术 | 版本 | 选型理由 |
+|------|------|------|----------|
+| 容器 | Docker | 20.x | 标准化部署，环境一致性 |
+| 编排 | Docker Compose | 2.x | 简化多容器部署 |
+| 反向代理 | Nginx | 1.24+ | 高性能负载均衡 |
+
+四、功能模块详细设计
+
+4.1 音频预处理模块
+
+4.1.1 功能说明
+
+对输入音频进行预处理，提升语音识别准确率。
+
+4.1.2 处理流程
+
+1. 音频格式转换：统一转换为WAV格式，采样率16kHz，单声道
+2. 噪声检测：使用统计方法检测背景噪声
+3. 降噪处理：基于频谱减法进行噪声抑制
+4. 回声消除：使用自适应滤波器消除空间回声
+5. 语音增强：基于谱增强技术提升语音清晰度
+
+4.1.3 技术实现
+
+```python
+import librosa
+import numpy as np
+from scipy import signal
+
+def preprocess_audio(audio_path):
+    # 加载音频
+    y, sr = librosa.load(audio_path, sr=16000, mono=True)
+    
+    # 噪声检测与降噪
+    noise_level = np.mean(np.abs(y[:int(sr*0.5)]))
+    y_denoised = y - noise_level * 0.3
+    
+    # 回声消除（简化实现）
+    b, a = signal.butter(4, [300, 3000], btype='band', fs=sr)
+    y_filtered = signal.filtfilt(b, a, y_denoised)
+    
+    # 语音增强
+    y_enhanced = librosa.effects.preemphasis(y_filtered, coef=0.97)
+    
+    return y_enhanced, sr
+```
+
+4.2 语音识别模块
+
+4.2.1 功能说明
+
+基于OpenAI Whisper实现高精度语音转写。
+
+4.2.2 技术实现
+
+```python
+import whisper
+
+def transcribe_audio(audio_path, model_name="medium"):
+    model = whisper.load_model(model_name)
+    result = model.transcribe(audio_path, language="zh")
+    
+    return {
+        "text": result["text"],
+        "segments": result["segments"],
+        "language": result["language"]
+    }
+```
+
+4.3 说话人分离模块
+
+4.3.1 功能说明
+
+识别并分离不同说话人的发言内容。
+
+4.3.2 技术实现
+
+使用pyannote.audio进行说话人识别：
+
+```python
+from pyannote.audio import Pipeline
+
+def speaker_diarization(audio_path, hf_token):
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1",
+        use_auth_token=hf_token
+    )
+    
+    diarization = pipeline(audio_path)
+    
+    speaker_segments = []
+    for segment, _, speaker in diarization.itertracks(yield_label=True):
+        speaker_segments.append({
+            "start": segment.start,
+            "end": segment.end,
+            "speaker": speaker
+        })
+    
+    return speaker_segments
+```
+
+4.4 关键词提取模块
+
+4.4.1 功能说明
+
+自动提取会议中的核心关键词和高频讨论内容。
+
+4.4.2 技术实现
+
+```python
+from rake_nltk import Rake
+import jieba
+
+def extract_keywords(text, language="zh", top_n=10):
+    if language == "zh":
+        # 使用jieba分词
+        words = jieba.lcut(text)
+        # 过滤停用词
+        stopwords = set(["的", "是", "在", "和", "了", "有", "我", "他", "她", "它"])
+        filtered_words = [w for w in words if w not in stopwords and len(w) > 1]
+        # 统计词频
+        word_freq = {}
+        for word in filtered_words:
+            word_freq[word] = word_freq.get(word, 0) + 1
+        # 返回高频词
+        return sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    else:
+        r = Rake()
+        r.extract_keywords_from_text(text)
+        return r.get_ranked_phrases()[:top_n]
+```
+
+4.5 主题分析模块
+
+4.5.1 功能说明
+
+对会议内容进行语义分析，识别讨论主题和核心方向。
+
+4.5.2 技术实现
+
+```python
+from transformers import pipeline
+
+def analyze_topic(text, language="zh"):
+    classifier = pipeline("zero-shot-classification",
+                          model="facebook/bart-large-mnli")
+    
+    candidate_topics = ["工作汇报", "项目讨论", "问题解决", "决策制定", 
+                        "进度跟进", "计划安排", "意见交流", "培训学习"]
+    
+    result = classifier(text, candidate_topics, multi_label=True)
+    
+    return {
+        "topics": result["labels"],
+        "scores": result["scores"]
+    }
+```
+
+4.6 知识库管理模块
+
+4.6.1 功能说明
+
+管理会议文件、会议精神、强制传达要点及管控关键词。
+
+4.6.2 数据结构
+
+```python
+class KnowledgeBaseItem:
+    def __init__(self, item_id, title, content, item_type, keywords, 
+                 required_points=None, status="active", created_at=None):
+        self.item_id = item_id
+        self.title = title
+        self.content = content
+        self.item_type = item_type  # "policy", "meeting_minutes", "key_points", "risk_keywords"
+        self.keywords = keywords
+        self.required_points = required_points or []
+        self.status = status
+        self.created_at = created_at
+```
+
+4.6.3 核心功能
+
+- 知识库条目增删改查
+- 关键词标签管理
+- 必传要点管理
+- 风险关键词管理
+- 数据导入导出
+
+4.7 合规比对模块
+
+4.7.1 功能说明
+
+将语音转写内容与政策知识库进行语义相似度比对，生成合规评分。
+
+4.7.2 合规评分算法
+
+```python
+def calculate_compliance_score(transcription, knowledge_base_items):
+    """
+    计算合规评分（0-100分）
+    
+    评分权重：
+    - 语义相似度匹配：40%
+    - 必传要点覆盖率：30%
+    - 风险内容检测：20%
+    - 关键词命中：10%
+    """
+    
+    score_components = {
+        "semantic_similarity": 0,
+        "point_coverage": 0,
+        "risk_detection": 0,
+        "keyword_matching": 0
+    }
+    
+    # 1. 语义相似度匹配（40分）
+    total_similarity = 0
+    item_count = len(knowledge_base_items)
+    for item in knowledge_base_items:
+        similarity = calculate_semantic_similarity(transcription, item.content)
+        total_similarity += similarity
+    score_components["semantic_similarity"] = (total_similarity / max(item_count, 1)) * 40
+    
+    # 2. 必传要点覆盖率（30分）
+    all_required_points = []
+    covered_points = []
+    for item in knowledge_base_items:
+        all_required_points.extend(item.required_points)
+    
+    for point in all_required_points:
+        if point.lower() in transcription.lower():
+            covered_points.append(point)
+    
+    coverage_rate = len(covered_points) / max(len(all_required_points), 1)
+    score_components["point_coverage"] = coverage_rate * 30
+    
+    # 3. 风险内容检测（20分）
+    risk_keywords = []
+    for item in knowledge_base_items:
+        if item.item_type == "risk_keywords":
+            risk_keywords.extend(item.keywords)
+    
+    risk_count = sum(1 for kw in risk_keywords if kw.lower() in transcription.lower())
+    risk_score = max(0, 20 - risk_count * 5)
+    score_components["risk_detection"] = risk_score
+    
+    # 4. 关键词命中（10分）
+    all_keywords = []
+    matched_keywords = []
+    for item in knowledge_base_items:
+        all_keywords.extend(item.keywords)
+    
+    for kw in all_keywords:
+        if kw.lower() in transcription.lower():
+            matched_keywords.append(kw)
+    
+    keyword_rate = len(matched_keywords) / max(len(all_keywords), 1)
+    score_components["keyword_matching"] = keyword_rate * 10
+    
+    # 总分
+    total_score = sum(score_components.values())
+    
+    return {
+        "total_score": round(total_score, 2),
+        "components": score_components,
+        "covered_points": covered_points,
+        "missing_points": [p for p in all_required_points if p not in covered_points],
+        "risk_keywords_found": [kw for kw in risk_keywords if kw.lower() in transcription.lower()],
+        "matched_keywords": matched_keywords
+    }
+
+def calculate_semantic_similarity(text1, text2):
+    """计算两段文本的语义相似度"""
+    from sentence_transformers import SentenceTransformer, util
+    
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    embedding1 = model.encode(text1, convert_to_tensor=True)
+    embedding2 = model.encode(text2, convert_to_tensor=True)
+    
+    cosine_score = util.cos_sim(embedding1, embedding2).item()
+    return cosine_score
+```
+
+4.7.3 合规报告生成
+
+```python
+def generate_compliance_report(meeting_id, transcription, compliance_result):
+    """生成合规分析报告"""
+    report = {
+        "meeting_id": meeting_id,
+        "report_time": datetime.now().isoformat(),
+        "overall_score": compliance_result["total_score"],
+        "score_level": get_score_level(compliance_result["total_score"]),
+        "detailed_scores": compliance_result["components"],
+        "summary": {
+            "covered_points_count": len(compliance_result["covered_points"]),
+            "total_points_count": len(compliance_result["covered_points"]) + len(compliance_result["missing_points"]),
+            "risk_items_count": len(compliance_result["risk_keywords_found"]),
+            "matched_keywords_count": len(compliance_result["matched_keywords"])
+        },
+        "missing_points": compliance_result["missing_points"],
+        "risk_keywords": compliance_result["risk_keywords_found"],
+        "suggestions": generate_suggestions(compliance_result)
+    }
+    
+    return report
+
+def get_score_level(score):
+    if score >= 90:
+        return "优秀"
+    elif score >= 75:
+        return "良好"
+    elif score >= 60:
+        return "合格"
+    else:
+        return "不合格"
+
+def generate_suggestions(compliance_result):
+    suggestions = []
+    
+    if compliance_result["total_score"] < 60:
+        suggestions.append("会议内容与政策要求差距较大，建议重新传达")
+    
+    if compliance_result["missing_points"]:
+        suggestions.append(f"以下必传要点未覆盖：{', '.join(compliance_result['missing_points'])}")
+    
+    if compliance_result["risk_keywords_found"]:
+        suggestions.append(f"发现风险内容：{', '.join(compliance_result['risk_keywords_found'])}，请核查")
+    
+    if not suggestions:
+        suggestions.append("会议内容合规，继续保持")
+    
+    return suggestions
+```
+
+五、数据库设计
+
+5.1 数据库表结构
+
+5.1.1 meetings（会议表）
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| id | INT | PRIMARY KEY, AUTO_INCREMENT | 会议ID |
+| title | VARCHAR(255) | NOT NULL | 会议标题 |
+| date | DATETIME | NOT NULL | 会议时间 |
+| duration | INT | | 会议时长（分钟） |
+| status | VARCHAR(20) | DEFAULT 'processing' | 状态：processing/finished/failed |
+| created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+| updated_at | DATETIME | ON UPDATE CURRENT_TIMESTAMP | 更新时间 |
+
+5.1.2 transcriptions（转写表）
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| id | INT | PRIMARY KEY, AUTO_INCREMENT | 转写ID |
+| meeting_id | INT | FOREIGN KEY | 关联会议ID |
+| speaker | VARCHAR(50) | | 说话人标识 |
+| text | TEXT | NOT NULL | 转写文本 |
+| start_time | FLOAT | | 开始时间（秒） |
+| end_time | FLOAT | | 结束时间（秒） |
+| confidence | FLOAT | | 置信度 |
+| created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+
+5.1.3 knowledge_base（知识库表）
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| id | INT | PRIMARY KEY, AUTO_INCREMENT | 条目ID |
+| title | VARCHAR(255) | NOT NULL | 标题 |
+| content | TEXT | NOT NULL | 内容 |
+| item_type | VARCHAR(50) | NOT NULL | 类型：policy/meeting_minutes/key_points/risk_keywords |
+| keywords | TEXT | | 关键词（JSON数组） |
+| required_points | TEXT | | 必传要点（JSON数组） |
+| status | VARCHAR(20) | DEFAULT 'active' | 状态：active/inactive |
+| created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+| updated_at | DATETIME | ON UPDATE CURRENT_TIMESTAMP | 更新时间 |
+
+5.1.4 compliance_reports（合规报告表）
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| id | INT | PRIMARY KEY, AUTO_INCREMENT | 报告ID |
+| meeting_id | INT | FOREIGN KEY | 关联会议ID |
+| total_score | FLOAT | NOT NULL | 合规总分 |
+| score_level | VARCHAR(20) | | 评分等级 |
+| detailed_scores | TEXT | | 分项得分（JSON） |
+| missing_points | TEXT | | 遗漏要点（JSON数组） |
+| risk_keywords | TEXT | | 风险关键词（JSON数组） |
+| suggestions | TEXT | | 建议（JSON数组） |
+| created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+
+5.1.5 score_weights（评分权重表）
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| id | INT | PRIMARY KEY, AUTO_INCREMENT | ID |
+| weight_name | VARCHAR(50) | NOT NULL | 权重名称 |
+| weight_value | FLOAT | NOT NULL | 权重值（0-100） |
+| description | VARCHAR(255) | | 描述 |
+| updated_at | DATETIME | ON UPDATE CURRENT_TIMESTAMP | 更新时间 |
+
+5.2 数据库ER图
+
+meetings 1:N transcriptions
+meetings 1:N compliance_reports
+knowledge_base 独立表
+score_weights 独立表
+
+六、API接口设计
+
+6.1 音频分析接口
+
+6.1.1 上传音频并分析
+
+POST /api/v1/meetings/analyze
+
+请求参数：
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| audio_file | FILE | 是 | 音频文件（支持wav、mp3、ogg） |
+| meeting_title | STRING | 是 | 会议标题 |
+| enable_speaker_diarization | BOOL | 否 | 是否启用说话人分离（默认true） |
+| enable_compliance_check | BOOL | 否 | 是否启用合规检查（默认true） |
+
+响应示例：
+```json
+{
+    "code": 200,
+    "message": "分析完成",
+    "data": {
+        "meeting_id": 1,
+        "title": "2024年度工作总结会议",
+        "transcription": [
+            {
+                "speaker": "SPEAKER_00",
+                "text": "各位同事，今天我们召开年度工作总结会议...",
+                "start_time": 0.0,
+                "end_time": 15.5,
+                "confidence": 0.98
+            }
+        ],
+        "keywords": [
+            {"word": "工作总结", "frequency": 5},
+            {"word": "目标", "frequency": 3}
+        ],
+        "topics": [
+            {"topic": "工作汇报", "score": 0.92},
+            {"topic": "计划安排", "score": 0.78}
+        ]
+    }
+}
+```
+
+6.1.2 获取会议详情
+
+GET /api/v1/meetings/{meeting_id}
+
+响应示例：
+```json
+{
+    "code": 200,
+    "data": {
+        "meeting_id": 1,
+        "title": "2024年度工作总结会议",
+        "date": "2024-01-15T10:00:00",
+        "duration": 120,
+        "status": "finished",
+        "transcription": [...],
+        "keywords": [...],
+        "topics": [...]
+    }
+}
+```
+
+6.1.3 获取会议列表
+
+GET /api/v1/meetings
+
+请求参数：
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| page | INT | 否 | 页码（默认1） |
+| page_size | INT | 否 | 每页数量（默认10） |
+| status | STRING | 否 | 状态过滤 |
+
+6.2 知识库管理接口
+
+6.2.1 创建知识库条目
+
+POST /api/v1/knowledge-base
+
+请求参数：
+```json
+{
+    "title": "2024年政策要点",
+    "content": "根据上级文件要求，本年度重点工作包括...",
+    "item_type": "policy",
+    "keywords": ["政策", "重点工作", "要求"],
+    "required_points": ["安全生产", "质量管控", "合规经营"]
+}
+```
+
+6.2.2 更新知识库条目
+
+PUT /api/v1/knowledge-base/{item_id}
+
+6.2.3 删除知识库条目
+
+DELETE /api/v1/knowledge-base/{item_id}
+
+6.2.4 获取知识库列表
+
+GET /api/v1/knowledge-base
+
+6.2.5 搜索知识库
+
+GET /api/v1/knowledge-base/search?q={keyword}
+
+6.3 合规比对接口
+
+6.3.1 获取合规报告
+
+GET /api/v1/meetings/{meeting_id}/compliance
+
+响应示例：
+```json
+{
+    "code": 200,
+    "data": {
+        "meeting_id": 1,
+        "total_score": 85.5,
+        "score_level": "良好",
+        "detailed_scores": {
+            "semantic_similarity": 38.0,
+            "point_coverage": 25.5,
+            "risk_detection": 20.0,
+            "keyword_matching": 2.0
+        },
+        "missing_points": ["质量管控"],
+        "risk_keywords": [],
+        "suggestions": ["以下必传要点未覆盖：质量管控"]
+    }
+}
+```
+
+6.3.2 更新评分权重
+
+PUT /api/v1/score-weights
+
+请求参数：
+```json
+{
+    "semantic_similarity": 40,
+    "point_coverage": 30,
+    "risk_detection": 20,
+    "keyword_matching": 10
+}
+```
+
+6.4 健康检查接口
+
+GET /api/v1/health
+
+响应示例：
+```json
+{"status": "ok", "message": "API service is running"}
+```
+
+七、部署方案
+
+7.1 Docker部署
+
+7.1.1 Dockerfile
+
+```dockerfile
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y ffmpeg git gcc g++ make \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+COPY . .
+
+EXPOSE 5000
+
+CMD ["python", "app.py"]
+```
+
+7.1.2 docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - MYSQL_HOST=db
+      - MYSQL_USER=admin
+      - MYSQL_PASSWORD=password
+      - MYSQL_DB=meeting_analysis
+      - REDIS_HOST=redis
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./models:/root/.cache/whisper
+      - ./uploads:/app/uploads
+
+  db:
+    image: mysql:8.0
+    environment:
+      - MYSQL_ROOT_PASSWORD=root_password
+      - MYSQL_USER=admin
+      - MYSQL_PASSWORD=password
+      - MYSQL_DATABASE=meeting_analysis
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+
+  redis:
+    image: redis:7.0
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+
+volumes:
+  mysql_data:
+  redis_data:
+```
+
+7.2 环境变量配置
+
+```bash
+# Flask配置
+FLASK_ENV=production
+FLASK_APP=app.py
+
+# 数据库配置
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=admin
+MYSQL_PASSWORD=password
+MYSQL_DB=meeting_analysis
+
+# Redis配置
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+# HuggingFace配置
+HF_TOKEN=your_huggingface_token
+
+# 模型配置
+WHISPER_MODEL=medium
+SPEAKER_DIARIZATION_ENABLED=true
+```
+
+7.3 启动命令
+
+```bash
+# 开发环境
+python app.py
+
+# Docker部署
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+```
+
+八、安全性考虑
+
+8.1 数据安全
+
+- 音频文件和转写内容加密存储
+- 敏感数据传输使用HTTPS
+- 数据库访问控制，最小权限原则
+
+8.2 API安全
+
+- API访问令牌认证（JWT）
+- 请求频率限制（Rate Limiting）
+- 请求参数校验和过滤
+- SQL注入防护
+
+8.3 权限管理
+
+- 基于角色的访问控制（RBAC）
+- 管理员、普通用户、只读用户角色划分
+- 操作日志记录
+
+8.4 文件安全
+
+- 文件上传类型白名单限制
+- 文件大小限制
+- 文件内容安全扫描
+
+九、性能优化方案
+
+9.1 模型优化
+
+- 使用量化模型减少内存占用
+- 模型预热，提前加载到内存
+- 模型缓存，避免重复加载
+
+9.2 并发处理
+
+- 使用异步处理框架（Celery）
+- 任务队列管理
+- 多进程/多线程处理
+
+9.3 缓存策略
+
+- Redis缓存高频访问数据
+- 转写结果缓存
+- 知识库内容缓存
+
+9.4 数据库优化
+
+- 索引优化
+- 查询优化
+- 读写分离
+
+9.5 负载均衡
+
+- Nginx反向代理
+- 多实例部署
+- 动态扩容
+
+附录：依赖清单
+
+核心Python依赖：
+- flask==3.1.3
+- flask-cors==6.0.5
+- openai-whisper==20250625
+- pyannote-audio==3.1.1
+- transformers==5.13.0
+- torch==2.12.0
+- librosa==0.10.1
+- rake-nltk==1.4.6
+- jieba==0.42.1
+- sentence-transformers==3.0.1
+- mysql-connector-python==8.4.0
+- redis==5.0.1
+- celery==5.4.0
+
+开发依赖：
+- pytest==8.3.0
+- pytest-cov==5.0.0
+- flake8==7.1.1
