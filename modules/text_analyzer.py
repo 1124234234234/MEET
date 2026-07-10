@@ -56,6 +56,17 @@ def extract_keywords(text, top_n=10, language='zh'):
             '大家', '各位', '领导', '同事', '今天', '现在', '然后', '觉得',
             '进行', '通过', '关于', '对于', '根据', '按照', '作为', '为了',
             '这个', '那个', '这些', '那些', '这样', '那样', '什么', '怎么',
+            # 过滤代词和人称
+            '我', '你', '他', '她', '我们', '你们', '他们', '她们',
+            '自己', '别人', '本人', '有人',
+            # 过滤常见无意义词
+            '一般', '有点', '一下', '一些', '一点', '一直', '一定', '一样',
+            '可以', '可能', '应该', '会', '不会', '能', '不能',
+            '没有', '没什么',
+            # 过滤常见人名模式（小名+姓氏）
+            '小王', '小张', '小李', '小刘', '小陈', '小杨', '小黄', '小吴',
+            '小赵', '小钱', '小孙', '小周', '小徐', '小朱', '小胡', '小郭',
+            '小林', '小马', '小罗', '小高', '小郑', '小梁', '小宋', '小唐',
         ])
 
         filtered_words = []
@@ -217,16 +228,36 @@ def extract_key_sentences(text, top_n=5, language='zh'):
     return [sentences[i] for i in selected_indices]
 
 
+def _is_low_quality_sentence(sentence):
+    """判断句子是否为低质量（重复、无意义）"""
+    if not sentence or len(sentence) < 5:
+        return True
+    # 检测重复模式（如"我会我会我会"）
+    if re.search(r'(.{2,})\1{2,}', sentence):
+        return True
+    # 检测无意义的重复字（如"仪仪仪"）
+    if re.search(r'(.)\1{3,}', sentence):
+        return True
+    # 检测过度重复的短语
+    words = jieba.lcut(sentence)
+    unique_ratio = len(set(words)) / max(len(words), 1)
+    if unique_ratio < 0.3 and len(words) > 10:  # 重复度太高
+        return True
+    return False
+
+
 def generate_summary(text, max_length=500, language='zh'):
     """
     生成会议摘要：快速提炼会议重点信息
-    改进：结构化摘要，包含主题、要点、关键结论
+    改进：结构化摘要，包含主题、要点、关键结论，过滤低质量句子
     """
     if not text or len(text.strip()) < 20:
         return "内容过短，无法生成摘要"
 
     # 1. 提取关键句（TextRank）
-    key_sentences = extract_key_sentences(text, top_n=5, language=language)
+    key_sentences = extract_key_sentences(text, top_n=10, language=language)
+    # 过滤低质量句子
+    key_sentences = [s for s in key_sentences if not _is_low_quality_sentence(s)]
 
     # 2. 提取关键词
     keywords = extract_keywords(text, top_n=8, language=language)
@@ -254,7 +285,7 @@ def generate_summary(text, max_length=500, language='zh'):
         keyword_str = "、".join([kw['word'] for kw in keywords[:6]])
         summary_parts.append(f"核心议题包括：{keyword_str}")
 
-    # 主要内容（关键句）
+    # 主要内容（关键句）- 只取高质量的前3句
     if key_sentences:
         content = "；".join(key_sentences[:3])
         summary_parts.append(f"主要内容：{content}")

@@ -29,19 +29,36 @@ from modules.meeting_detector import MeetingDetector, count_participants, analyz
 from modules.report_generator import generate_meeting_summary_report, generate_compliance_trend_report, generate_report_html
 
 whisper_model = None
+whisper_model_realtime = None
 
 def init_whisper_model():
+    """加载上传分析用的模型（medium，准确度优先）"""
     global whisper_model
     if whisper_model is None:
-        print('Initializing Whisper model...')
+        model_name = app.config['WHISPER_MODEL']
+        print(f'Initializing Whisper model ({model_name}) for upload analysis...')
         try:
-            whisper_model = whisper.load_model(app.config['WHISPER_MODEL'])
-            print(f'Whisper {app.config["WHISPER_MODEL"]} model loaded successfully')
+            whisper_model = whisper.load_model(model_name)
+            print(f'Whisper {model_name} model loaded successfully')
         except Exception as e:
-            print(f'Failed to load {app.config["WHISPER_MODEL"]}: {e}')
+            print(f'Failed to load {model_name}: {e}')
             print('Loading small model as fallback...')
             whisper_model = whisper.load_model('small')
             print('Whisper small model loaded')
+
+def init_whisper_model_realtime():
+    """加载实时转写用的模型（small，速度优先）"""
+    global whisper_model_realtime
+    if whisper_model_realtime is None:
+        model_name = app.config['WHISPER_MODEL_REALTIME']
+        print(f'Initializing Whisper model ({model_name}) for realtime transcription...')
+        try:
+            whisper_model_realtime = whisper.load_model(model_name)
+            print(f'Whisper {model_name} model loaded successfully')
+        except Exception as e:
+            print(f'Failed to load {model_name}: {e}')
+            whisper_model_realtime = whisper.load_model('tiny')
+            print('Whisper tiny model loaded')
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
@@ -620,7 +637,8 @@ with app.app_context():
         db.session.commit()
 
 if __name__ == '__main__':
-    init_whisper_model()
-    register_socketio_events(socketio, whisper_model)
+    init_whisper_model()          # 加载 medium 用于上传分析
+    init_whisper_model_realtime() # 加载 small 用于实时转写
+    register_socketio_events(socketio, whisper_model_realtime)
     print(f'\nReady to accept requests on 0.0.0.0:5000')
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)

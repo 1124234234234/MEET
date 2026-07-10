@@ -6,7 +6,8 @@ class Config:
     UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
     ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a'}
     
-    WHISPER_MODEL = os.environ.get('WHISPER_MODEL') or 'small'
+    WHISPER_MODEL = os.environ.get('WHISPER_MODEL') or 'medium'
+    WHISPER_MODEL_REALTIME = os.environ.get('WHISPER_MODEL_REALTIME') or 'small'
     
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///' + os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'meeting_analysis.db')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
