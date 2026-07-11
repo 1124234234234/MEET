@@ -10,6 +10,24 @@ import re
 import numpy as np
 import math
 
+# 缓存sentence_transformers模型，避免每次分析都重新加载
+_sentence_transformer_models = {}
+
+def get_sentence_transformer_model(language='zh'):
+    """获取缓存的sentence_transformers模型"""
+    model_name = "BAAI/bge-small-zh-v1.5" if language == 'zh' else "all-MiniLM-L6-v2"
+    
+    if model_name not in _sentence_transformer_models:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _sentence_transformer_models[model_name] = SentenceTransformer(model_name)
+            print(f"Loaded sentence_transformer model: {model_name}")
+        except Exception as e:
+            print(f"Failed to load sentence_transformer model: {e}")
+            return None
+    
+    return _sentence_transformer_models[model_name]
+
 
 # 停用词表
 STOPWORDS_ZH = set([
@@ -281,7 +299,7 @@ def _convert_person(text):
 
 def _summarize_content(key_sentences):
     """
-    真正的总结提炼：不是简单拼接，而是用第三人称叙述
+    真正的总结提炼：不是简单拼接，而是用第三人称叙述，重新组织语言
     """
     if not key_sentences:
         return ""
@@ -293,37 +311,101 @@ def _summarize_content(key_sentences):
     if not converted:
         return ""
     
-    # 提取关键信息点
-    info_points = []
+    # 提取关键信息点并重新组织
+    summary_parts = []
     
-    # 模式匹配提取
-    patterns = [
-        (r'(讨论|研究|审议|决定|批准|同意|否决|通过)\s+(.{2,20})', r'\1\2'),
-        (r'(要求|必须|应当|应该)\s+(.{2,30})', r'会议强调\2'),
-        (r'(提出|建议|提议)\s+(.{2,30})', r'会议提出\2'),
-        (r'(明确|确定|确认)\s+(.{2,20})', r'会议明确\2'),
-        (r'(汇报|报告|说明)\s+(.{2,30})', r'会议听取了\2的汇报'),
-        (r'(介绍|讲解)\s+(.{2,20})', r'参会人员介绍了\2'),
-        (r'(分析|评估|讨论)\s+(.{2,20})', r'会议分析了\2'),
-        (r'(达成|形成)\s+(共识|决议|意见)', r'会议\1\2'),
+    # 1. 识别讨论的主题/对象
+    topic_patterns = [
+        r'(讨论|研究|审议|探讨)\s+(.{2,20})',
+        r'(关于|针对)\s+(.{2,20})的讨论',
+        r'(介绍|讲解|说明)\s+(.{2,20})',
     ]
-    
+    topics_found = []
     for sent in converted:
-        matched = False
-        for pattern, replacement in patterns:
+        for pattern in topic_patterns:
             match = re.search(pattern, sent)
             if match:
-                info_points.append(match.expand(replacement))
-                matched = True
-                break
+                topic = match.group(2).strip()
+                if topic not in topics_found:
+                    topics_found.append(topic)
+    
+    if topics_found:
+        summary_parts.append(f"会议围绕{'、'.join(topics_found)}等议题进行讨论")
+    
+    # 2. 识别主要观点/决定
+    decision_patterns = [
+        r'(决定|决议|同意|批准|通过)\s+(.{2,30})',
+        r'(明确|确定)\s+(.{2,20})',
+        r'(达成|形成)\s+(共识|决议|一致意见)',
+    ]
+    decisions_found = []
+    for sent in converted:
+        for pattern in decision_patterns:
+            match = re.search(pattern, sent)
+            if match:
+                content = match.group(0).strip()
+                if content not in decisions_found:
+                    decisions_found.append(content)
+    
+    if decisions_found:
+        summary_parts.append("会议" + "，".join(decisions_found))
+    
+    # 3. 识别要求/行动项
+    requirement_patterns = [
+        r'(要求|必须|应当|应该)\s+(.{2,40})',
+        r'(提出|建议)\s+(.{2,30})',
+    ]
+    requirements_found = []
+    for sent in converted:
+        for pattern in requirement_patterns:
+            match = re.search(pattern, sent)
+            if match:
+                content = match.group(0).strip()
+                if content not in requirements_found:
+                    requirements_found.append(content)
+    
+    if requirements_found:
+        summary_parts.append("会议强调" + "；".join(requirements_found))
+    
+    # 4. 如果没有匹配到模式，用更智能的方式总结
+    if not summary_parts:
+        # 提取核心名词和动词
+        all_text = "。".join(converted)
+        keywords = extract_keywords(all_text, top_n=5)
+        keyword_str = "、".join([kw['word'] for kw in keywords])
         
-        if not matched and len(sent) <= 40:
-            info_points.append("会议提到：" + sent)
+        # 从句子中提取关键动作
+        action_words = ['讨论', '分析', '决定', '要求', '提出', '确认', '明确', '达成']
+        actions_found = []
+        for sent in converted:
+            for action in action_words:
+                if action in sent:
+                    # 提取动作后的内容
+                    idx = sent.find(action)
+                    action_part = sent[idx:idx+30].strip()
+                    if action_part not in actions_found:
+                        actions_found.append(action_part)
+        
+        if actions_found:
+            summary_parts.append(f"会议主要内容：{keyword_str}；" + "；".join(actions_found[:2]))
+        else:
+            # 直接使用关键句，但重新组织语言
+            if len(converted) <= 2:
+                summary_parts.append("会议主要内容：" + "；".join(converted))
+            else:
+                # 合并相似内容
+                merged = []
+                for sent in converted:
+                    is_duplicate = False
+                    for existing in merged:
+                        if sent in existing or existing in sent:
+                            is_duplicate = True
+                            break
+                    if not is_duplicate:
+                        merged.append(sent)
+                summary_parts.append("会议主要内容：" + "；".join(merged[:3]))
     
-    # 去重
-    info_points = list(dict.fromkeys(info_points))
-    
-    return "；".join(info_points[:3])
+    return "。".join(summary_parts)
 
 
 def generate_summary(text, max_length=500, language='zh'):
@@ -462,10 +544,11 @@ def analyze_topic(text, language='zh', candidate_topics=None):
 
     # 先尝试语义相似度
     try:
-        from sentence_transformers import SentenceTransformer, util
+        from sentence_transformers import util
 
-        model_name = "BAAI/bge-small-zh-v1.5" if language == 'zh' else "all-MiniLM-L6-v2"
-        model = SentenceTransformer(model_name)
+        model = get_sentence_transformer_model(language)
+        if model is None:
+            raise Exception("sentence_transformer model not available")
 
         # 将文本截取（避免过长文本导致编码慢）
         text_segment = text[:2000] if len(text) > 2000 else text
