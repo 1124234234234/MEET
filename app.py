@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import threading
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
@@ -14,6 +15,9 @@ app = Flask(__name__)
 app.config.from_object('config.Config')
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# 分析进度存储
+analysis_progress = {}
 
 from database import db
 
@@ -126,6 +130,11 @@ def create_meeting():
 
     audio_file.save(original_path)
 
+    # 检查音频文件大小（避免空文件导致Whisper崩溃）
+    file_size = os.path.getsize(original_path)
+    if file_size < 1024:  # 小于1KB认为是空文件或无效文件
+        return jsonify({'code': 400, 'message': '音频文件太小或为空，请上传有效的音频文件'}), 400
+
     # 音频预处理（可选，默认跳过以加快速度）
     if enable_diarization:
         try:
@@ -145,136 +154,138 @@ def create_meeting():
     db.session.add(meeting)
     db.session.commit()
 
-    import time
-    start_time = time.time()
+    # 异步分析
+    thread = threading.Thread(
+        target=_process_meeting_async,
+        args=(meeting.id, processed_path, enable_diarization, enable_compliance)
+    )
+    thread.daemon = True
+    thread.start()
 
-    init_whisper_model()
+    return jsonify({'code': 200, 'message': '分析已开始', 'meeting_id': meeting.id})
+
+
+def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_compliance):
+    """异步处理会议分析"""
+    def update_progress(percent, message):
+        analysis_progress[meeting_id] = {'progress': percent, 'message': message}
+        socketio.emit('analysis_progress', {'meeting_id': meeting_id, 'progress': percent, 'message': message})
 
     try:
+        update_progress(5, '正在初始化模型...')
+        init_whisper_model()
+
+        update_progress(10, '正在转写音频...')
         from modules.whisper_utils import transcribe_with_fix
-
-        # 转写阶段
-        transcribe_start = time.time()
-        result = transcribe_with_fix(whisper_model, processed_path, language='zh')
+        result = transcribe_with_fix(whisper_model, audio_path, language='zh')
         full_text = result['text']
-        print(f"[TIMING] Transcription took: {time.time() - transcribe_start:.2f}s")
 
-        # 说话人分离阶段
+        update_progress(40, '正在进行说话人分离...')
         speaker_segments = []
         if enable_diarization:
-            diarize_start = time.time()
             try:
-                speaker_segments = speaker_diarization_simple(processed_path)
+                speaker_segments = speaker_diarization_simple(audio_path)
             except Exception as e:
                 print(f'Speaker diarization failed: {e}')
-            print(f"[TIMING] Speaker diarization took: {time.time() - diarize_start:.2f}s")
 
-        for segment in result['segments']:
-            speaker = 'SPEAKER_00'
-            if speaker_segments:
-                for ss in speaker_segments:
-                    if ss['start'] <= segment['start'] <= ss['end']:
-                        speaker = ss['speaker']
-                        break
+        with app.app_context():
+            meeting = Meeting.query.get(meeting_id)
+            if not meeting:
+                return
 
-            transcription = Transcription(
-                meeting_id=meeting.id,
-                speaker=speaker,
-                text=segment['text'],
-                start_time=segment['start'],
-                end_time=segment['end'],
-                confidence=segment.get('confidence', 0.0),
-                language=result['language']
-            )
-            db.session.add(transcription)
+            # 保存转写段落
+            for segment in result['segments']:
+                speaker = 'SPEAKER_00'
+                if speaker_segments:
+                    for ss in speaker_segments:
+                        if ss['start'] <= segment['start'] <= ss['end']:
+                            speaker = ss['speaker']
+                            break
 
-        # 关键词提取
-        keywords = extract_keywords(full_text, top_n=10)
-        # 主题分析
-        topics = analyze_topic(full_text)
-        # 会议摘要生成
-        summary = generate_summary(full_text, max_length=300)
-        # 情绪分析
-        sentiment = analyze_sentiment(full_text)
+                transcription = Transcription(
+                    meeting_id=meeting.id,
+                    speaker=speaker,
+                    text=segment['text'],
+                    start_time=segment['start'],
+                    end_time=segment['end'],
+                    confidence=segment.get('confidence', 0.0),
+                    language=result['language']
+                )
+                db.session.add(transcription)
+            db.session.commit()
 
-        # 音频质量报告（可选，默认跳过以加快速度）
-        audio_quality = None
-        if enable_diarization:
-            try:
-                audio_quality = get_audio_quality_report(original_path, processed_path)
-            except Exception as e:
-                print(f'Audio quality report failed: {e}')
+            update_progress(55, '正在提取关键词...')
+            keywords = extract_keywords(full_text, top_n=10)
+            
+            update_progress(65, '正在分析主题...')
+            topics = analyze_topic(full_text)
+            
+            update_progress(75, '正在生成会议摘要...')
+            summary = generate_summary(full_text, max_length=300)
+            
+            update_progress(80, '正在分析情绪...')
+            sentiment = analyze_sentiment(full_text)
 
-        meeting.duration = int(result['segments'][-1]['end']) if result['segments'] else 0
-        # 保存会议梗概信息到数据库
-        meeting.summary = summary
-        meeting.keywords = json.dumps(keywords)
-        meeting.topics = json.dumps(topics)
-        meeting.sentiment = json.dumps(sentiment)
+            audio_quality = None
+            if enable_diarization:
+                try:
+                    audio_quality = get_audio_quality_report(audio_path, audio_path)
+                except Exception as e:
+                    print(f'Audio quality report failed: {e}')
 
-        compliance_result = None
-        if enable_compliance:
-            knowledge_items = KnowledgeBase.query.filter_by(status='active').all()
-            # 获取转写段落用于时间节点标记
-            transcription_segments = [t.to_dict() for t in Transcription.query.filter_by(meeting_id=meeting.id).all()]
-            compliance_result = calculate_compliance_score(full_text, knowledge_items, transcription_segments=transcription_segments)
+            meeting.duration = int(result['segments'][-1]['end']) if result['segments'] else 0
+            meeting.summary = summary
+            meeting.keywords = json.dumps(keywords)
+            meeting.topics = json.dumps(topics)
+            meeting.sentiment = json.dumps(sentiment)
 
-            report = ComplianceReport(
-                meeting_id=meeting.id,
-                total_score=compliance_result['total_score'],
-                score_level=get_score_level(compliance_result['total_score']),
-                detailed_scores=json.dumps(compliance_result['components']),
-                missing_points=json.dumps(compliance_result['missing_points']),
-                risk_keywords=json.dumps(compliance_result['risk_keywords_found']),
-                risk_time_markers=json.dumps(compliance_result.get('risk_time_markers', [])),
-                point_time_markers=json.dumps(compliance_result.get('point_time_markers', [])),
-                matched_keywords=json.dumps(compliance_result['matched_keywords']),
-                suggestions=json.dumps(compliance_result['suggestions'])
-            )
-            db.session.add(report)
+            compliance_result = None
+            if enable_compliance:
+                update_progress(85, '正在进行合规检查...')
+                knowledge_items = KnowledgeBase.query.filter_by(status='active').all()
+                transcription_segments = [t.to_dict() for t in Transcription.query.filter_by(meeting_id=meeting.id).all()]
+                compliance_result = calculate_compliance_score(full_text, knowledge_items, transcription_segments=transcription_segments)
 
-            meeting.total_score = compliance_result['total_score']
-            meeting.score_level = report.score_level
+                report = ComplianceReport(
+                    meeting_id=meeting.id,
+                    total_score=compliance_result['total_score'],
+                    score_level=get_score_level(compliance_result['total_score']),
+                    detailed_scores=json.dumps(compliance_result['components']),
+                    missing_points=json.dumps(compliance_result['missing_points']),
+                    risk_keywords=json.dumps(compliance_result['risk_keywords_found']),
+                    risk_time_markers=json.dumps(compliance_result.get('risk_time_markers', [])),
+                    point_time_markers=json.dumps(compliance_result.get('point_time_markers', [])),
+                    matched_keywords=json.dumps(compliance_result['matched_keywords']),
+                    suggestions=json.dumps(compliance_result['suggestions'])
+                )
+                db.session.add(report)
 
-        meeting.status = 'finished'
-        db.session.commit()
+                meeting.total_score = compliance_result['total_score']
+                meeting.score_level = report.score_level
 
-        response_data = {
-            'meeting_id': meeting.id,
-            'title': meeting.title,
-            'transcriptions': [t.to_dict() for t in Transcription.query.filter_by(meeting_id=meeting.id).all()],
-            'keywords': keywords,
-            'topics': topics,
-            'summary': summary,
-            'sentiment': sentiment,
-            'audio_quality': audio_quality,
-            'duration': meeting.duration,
-            'language': result['language']
-        }
+            meeting.status = 'finished'
+            db.session.commit()
 
-        if compliance_result:
-            response_data['compliance'] = {
-                'total_score': compliance_result['total_score'],
-                'score_level': get_score_level(compliance_result['total_score']),
-                'components': compliance_result['components'],
-                'covered_points': compliance_result['covered_points'],
-                'point_time_markers': compliance_result.get('point_time_markers', []),
-                'missing_points': compliance_result['missing_points'],
-                'risk_keywords': compliance_result['risk_keywords_found'],
-                'risk_time_markers': compliance_result.get('risk_time_markers', []),
-                'matched_keywords': compliance_result['matched_keywords'],
-                'suggestions': compliance_result['suggestions']
-            }
-
-        return jsonify({'code': 200, 'message': '分析完成', 'data': response_data})
+            update_progress(100, '分析完成')
+            print(f'Meeting {meeting_id} analysis completed')
 
     except Exception as e:
         print(f'Analysis failed: {e}')
         import traceback
         traceback.print_exc()
-        meeting.status = 'failed'
-        db.session.commit()
-        return jsonify({'code': 500, 'message': f'分析失败: {str(e)}'}), 500
+        with app.app_context():
+            meeting = Meeting.query.get(meeting_id)
+            if meeting:
+                meeting.status = 'failed'
+                db.session.commit()
+        update_progress(-1, f'分析失败: {str(e)}')
+
+
+@app.route('/api/meetings/<int:meeting_id>/progress')
+def get_analysis_progress(meeting_id):
+    """获取分析进度"""
+    progress = analysis_progress.get(meeting_id, {'progress': 0, 'message': '等待中...'})
+    return jsonify({'code': 200, 'data': progress})
 
 @app.route('/api/meetings/<int:meeting_id>', methods=['PUT'])
 def update_meeting(meeting_id):
