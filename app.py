@@ -169,16 +169,21 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
     """异步处理会议分析"""
     def update_progress(percent, message):
         analysis_progress[meeting_id] = {'progress': percent, 'message': message}
-        socketio.emit('analysis_progress', {'meeting_id': meeting_id, 'progress': percent, 'message': message})
+        try:
+            socketio.emit('analysis_progress', {'meeting_id': meeting_id, 'progress': percent, 'message': message})
+        except Exception:
+            pass
 
     try:
         update_progress(5, '正在初始化模型...')
         init_whisper_model()
 
         update_progress(10, '正在转写音频...')
+        print(f'Meeting {meeting_id}: starting transcription...')
         from modules.whisper_utils import transcribe_with_fix
         result = transcribe_with_fix(whisper_model, audio_path, language='zh')
         full_text = result['text']
+        print(f'Meeting {meeting_id}: transcription done, text length: {len(full_text)}')
 
         update_progress(40, '正在进行说话人分离...')
         speaker_segments = []
@@ -191,6 +196,7 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
         with app.app_context():
             meeting = Meeting.query.get(meeting_id)
             if not meeting:
+                print(f'Meeting {meeting_id}: not found, aborting')
                 return
 
             # 保存转写段落
@@ -267,18 +273,18 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
             db.session.commit()
 
             update_progress(100, '分析完成')
-            print(f'Meeting {meeting_id} analysis completed')
+            print(f'Meeting {meeting_id} analysis completed successfully')
 
     except Exception as e:
-        print(f'Analysis failed: {e}')
+        print(f'Meeting {meeting_id} analysis failed: {e}')
         import traceback
         traceback.print_exc()
+        update_progress(-1, f'分析失败: {str(e)}')
         with app.app_context():
             meeting = Meeting.query.get(meeting_id)
             if meeting:
                 meeting.status = 'failed'
                 db.session.commit()
-        update_progress(-1, f'分析失败: {str(e)}')
 
 
 @app.route('/api/meetings/<int:meeting_id>/progress')
