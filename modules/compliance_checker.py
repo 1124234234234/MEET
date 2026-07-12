@@ -54,8 +54,8 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
     point_sources = {}  # 记录每个要点来自哪个政策
     
     for item in active_items:
-        # 只处理 required 类型
-        if item.item_type == 'required':
+        # 支持 required 和 key_points 两种类型
+        if item.item_type in ['required', 'key_points']:
             points = json.loads(item.required_points) if item.required_points else []
             keywords = json.loads(item.keywords) if item.keywords else []
             
@@ -336,7 +336,8 @@ def realtime_compliance_check(text_segment, knowledge_base_items, start_time, en
     
     # 检查必传要点 - 使用关键词匹配
     for item in active_items:
-        if item.item_type == 'required':
+        # 支持 required 和 key_points 两种类型
+        if item.item_type in ['required', 'key_points']:
             keywords = json.loads(item.keywords) if item.keywords else []
             points = json.loads(item.required_points) if item.required_points else []
             

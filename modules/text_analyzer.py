@@ -268,14 +268,38 @@ def _convert_person(text):
     if not text:
         return ""
     
-    # 第一人称转换
-    text = text.replace('我', '发言者')
-    text = text.replace('我们', '会议')
-    text = text.replace('咱们', '参会人员')
-    text = text.replace('大家', '参会人员')
-    text = text.replace('同事', '参会人员')
+    replacements = [
+        ('我认为', '发言者认为'),
+        ('我觉得', '发言者认为'),
+        ('我觉得', '发言者认为'),
+        ('我想', '发言者提出'),
+        ('我说', '发言者表示'),
+        ('我建议', '发言者建议'),
+        ('我提议', '发言者提议'),
+        ('我同意', '发言者同意'),
+        ('我不同意', '发言者表示不同意'),
+        ('我们认为', '会议认为'),
+        ('我们觉得', '会议认为'),
+        ('我们决定', '会议决定'),
+        ('我们同意', '会议同意'),
+        ('我们建议', '会议建议'),
+        ('咱们', '参会人员'),
+        ('大家', '参会人员'),
+        ('同事', '参会人员'),
+        ('我说：', ''),
+        ('他说：', ''),
+        ('她说：', ''),
+        ('发言者说：', ''),
+        ('"', ''),
+        ('“', ''),
+        ('”', ''),
+    ]
     
-    # 问候语和开场白过滤
+    for old, new in replacements:
+        text = text.replace(old, new)
+    
+    text = text.replace('我', '发言者').replace('我们', '会议')
+    
     greeting_patterns = [
         r'大家好[，。！]',
         r'各位同事[，。！]',
@@ -294,10 +318,7 @@ def _convert_person(text):
     for pattern in greeting_patterns:
         text = re.sub(pattern, '', text)
     
-    # 语气词去除
     text = re.sub(r'[呢吧啊哦嗯呀哈嘿嘛咯]', '', text)
-    
-    # 去除多余标点和空白
     text = re.sub(r'[，,]+', '，', text)
     text = re.sub(r'[。.]+', '。', text)
     text = re.sub(r'\s+', '', text)
@@ -307,7 +328,7 @@ def _convert_person(text):
 
 def _summarize_content(key_sentences):
     """
-    真正的总结提炼：不是简单拼接，而是用第三人称叙述，重新组织语言
+    真正的总结提炼：用第三人称叙述，重新组织语言，生成结构清晰的会议纪要
     """
     if not key_sentences:
         return ""
@@ -318,158 +339,132 @@ def _summarize_content(key_sentences):
     if not converted:
         return ""
     
+    all_text = "。".join(converted)
+    keywords = extract_keywords(all_text, top_n=5)
+    keyword_str = "、".join([kw['word'] for kw in keywords])
+    
+    discussion_topics = []
+    decisions = []
+    requirements = []
+    opinions = []
+    
+    for sent in converted:
+        if re.search(r'(讨论|研究|审议|探讨|分析)', sent):
+            discussion_topics.append(sent)
+        elif re.search(r'(决定|决议|同意|批准|通过|达成)', sent):
+            decisions.append(sent)
+        elif re.search(r'(要求|必须|应当|应该|需要)', sent):
+            requirements.append(sent)
+        elif re.search(r'(认为|建议|提议|提出)', sent):
+            opinions.append(sent)
+    
     summary_parts = []
     
-    # 1. 识别讨论的主题/对象
-    topic_patterns = [
-        r'(讨论|研究|审议|探讨)\s+(.{2,20})',
-        r'(关于|针对)\s+(.{2,20})的讨论',
-        r'(介绍|讲解|说明)\s+(.{2,20})',
-    ]
-    topics_found = []
-    for sent in converted:
-        for pattern in topic_patterns:
-            match = re.search(pattern, sent)
+    if discussion_topics or keyword_str:
+        topics = []
+        for sent in discussion_topics:
+            match = re.search(r'(讨论|研究|审议|探讨|分析)\s+(.{2,30})', sent)
             if match:
-                topic = match.group(2).strip()
-                if topic not in topics_found:
-                    topics_found.append(topic)
+                topics.append(match.group(2).strip())
+        if topics:
+            summary_parts.append(f"会议围绕{'、'.join(topics)}等内容展开讨论")
+        elif keyword_str:
+            summary_parts.append(f"会议围绕{keyword_str}等议题展开讨论")
     
-    if topics_found:
-        summary_parts.append(f"围绕{'、'.join(topics_found)}等议题进行讨论")
+    if opinions:
+        opinion_texts = []
+        for op in opinions[:3]:
+            op_clean = re.sub(r'发言者(认为|建议|提议|提出)\s*', '', op)
+            opinion_texts.append(op_clean.strip())
+        if opinion_texts:
+            summary_parts.append(f"会上，发言者提出{';'.join(opinion_texts)}")
     
-    # 2. 识别主要观点/决定
-    decision_patterns = [
-        r'(决定|决议|同意|批准|通过)\s+(.{2,30})',
-        r'(明确|确定)\s+(.{2,20})',
-        r'(达成|形成)\s+(共识|决议|一致意见)',
-    ]
-    decisions_found = []
-    for sent in converted:
-        for pattern in decision_patterns:
-            match = re.search(pattern, sent)
-            if match:
-                content = match.group(0).strip()
-                if content not in decisions_found:
-                    decisions_found.append(content)
+    if decisions:
+        decision_texts = []
+        for d in decisions[:3]:
+            d_clean = re.sub(r'会议(决定|决议|同意|批准|通过|达成)\s*', '', d)
+            decision_texts.append(d_clean.strip())
+        if decision_texts:
+            summary_parts.append(f"会议决定{';'.join(decision_texts)}")
     
-    if decisions_found:
-        summary_parts.append("会议" + "，".join(decisions_found))
+    if requirements:
+        req_texts = []
+        for r in requirements[:3]:
+            r_clean = re.sub(r'(要求|必须|应当|应该|需要)\s*', '', r)
+            req_texts.append(r_clean.strip())
+        if req_texts:
+            summary_parts.append(f"会议强调，需{';'.join(req_texts)}")
     
-    # 3. 识别要求/行动项
-    requirement_patterns = [
-        r'(要求|必须|应当|应该)\s+(.{2,40})',
-        r'(提出|建议)\s+(.{2,30})',
-    ]
-    requirements_found = []
-    for sent in converted:
-        for pattern in requirement_patterns:
-            match = re.search(pattern, sent)
-            if match:
-                content = match.group(0).strip()
-                if content not in requirements_found:
-                    requirements_found.append(content)
-    
-    if requirements_found:
-        summary_parts.append("强调" + "；".join(requirements_found))
-    
-    # 4. 如果没有匹配到模式，用更智能的方式总结
     if not summary_parts:
-        all_text = "。".join(converted)
-        keywords = extract_keywords(all_text, top_n=5)
-        keyword_str = "、".join([kw['word'] for kw in keywords])
-        
-        action_words = ['讨论', '分析', '决定', '要求', '提出', '确认', '明确', '达成']
-        actions_found = []
-        for sent in converted:
-            for action in action_words:
-                if action in sent:
-                    idx = sent.find(action)
-                    action_part = sent[idx:idx+30].strip()
-                    if action_part not in actions_found:
-                        actions_found.append(action_part)
-        
-        if actions_found:
-            summary_parts.append(f"会议讨论了{keyword_str}等内容" + "；".join(actions_found[:2]))
+        if len(converted) <= 2:
+            summary_parts.append(f"会议讨论了{';'.join(converted)}")
         else:
-            if len(converted) <= 2:
-                summary_parts.append("会议讨论了" + "；".join(converted))
-            else:
-                merged = []
-                for sent in converted:
-                    is_duplicate = False
-                    for existing in merged:
-                        if sent in existing or existing in sent:
-                            is_duplicate = True
-                            break
-                    if not is_duplicate:
-                        merged.append(sent)
-                summary_parts.append("会议讨论了" + "；".join(merged[:2]))
+            merged = []
+            for sent in converted:
+                is_duplicate = False
+                for existing in merged:
+                    if sent in existing or existing in sent:
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    merged.append(sent)
+            summary_parts.append(f"会议讨论了{';'.join(merged[:2])}")
     
-    return "。".join(summary_parts)
+    result = "。".join(summary_parts)
+    if not result.endswith('。'):
+        result += '。'
+    
+    return result
 
 
 def generate_summary(text, max_length=500, language='zh'):
     """
     生成会议摘要：快速提炼会议重点信息
-    改进：第三人称叙述、真正的总结提炼、过滤对话语气
+    使用第三人称叙述，生成结构清晰的会议纪要
     """
     if not text or len(text.strip()) < 20:
         return "内容过短，无法生成摘要"
 
-    # 1. 提取关键句（TextRank）
     key_sentences = extract_key_sentences(text, top_n=10, language=language)
     key_sentences = [s for s in key_sentences if not _is_low_quality_sentence(s)]
 
-    # 2. 提取关键词
     keywords = extract_keywords(text, top_n=8, language=language)
 
-    # 3. 分析主题
     topics = analyze_topic(text, language=language)
 
-    # 4. 分析情绪
     sentiment = analyze_sentiment(text, language=language)
 
-    # 5. 识别会议动作项（需要做的事）
     action_items = extract_action_items(text, language=language)
     action_items = [_convert_person(item) for item in action_items if _convert_person(item)]
 
-    # 6. 组装结构化摘要
     summary_parts = []
 
-    # 主题概括
     if topics and topics[0]['score'] > 0:
         top_topics = [t['topic'] for t in topics[:3] if t['score'] > 0]
         if top_topics:
-            summary_parts.append(f"本次会议主要围绕{'、'.join(top_topics)}展开")
+            summary_parts.append(f"本次会议主要围绕{'、'.join(top_topics)}展开讨论")
 
-    # 关键议题
     if keywords:
         keyword_str = "、".join([kw['word'] for kw in keywords[:6]])
-        summary_parts.append(f"核心议题包括：{keyword_str}")
+        summary_parts.append(f"核心议题包括{keyword_str}")
 
-    # 主要内容（真正的总结提炼，不是原句拼接）
     summarized_content = _summarize_content(key_sentences)
     if summarized_content:
-        summary_parts.append(f"主要内容：{summarized_content}")
+        summary_parts.append(summarized_content)
 
-    # 动作项
     if action_items:
         action_str = "；".join(action_items[:3])
-        summary_parts.append(f"后续行动：{action_str}")
+        summary_parts.append(f"会议明确后续需{action_str}")
 
-    # 情绪倾向
     if sentiment['sentiment'] != 'neutral':
         sentiment_desc = "积极" if sentiment['sentiment'] == 'positive' else "消极"
-        summary_parts.append(f"整体氛围：{sentiment_desc}")
+        summary_parts.append(f"整体氛围{sentiment_desc}")
 
     summary = "。".join(summary_parts)
 
-    # 最后确保没有繁体字
     from modules.whisper_utils import fix_traditional_chinese
     summary = fix_traditional_chinese(summary)
 
-    # 控制长度
     if len(summary) > max_length:
         summary = summary[:max_length - 3] + "..."
 
