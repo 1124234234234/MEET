@@ -4,83 +4,112 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-def speaker_diarization_simple(audio_path, num_speakers=2):
+def speaker_diarization_simple(audio_path, num_speakers=2, timeout=30):
     """
     说话人分离：支持多人交替发言和同时发言场景
     优先使用 pyannote.audio，未配置时使用改进的聚类算法
+    添加超时机制，避免分析过长时间卡住
     """
-    try:
-        from pyannote.audio import Pipeline
-        import torch
+    import threading
 
-        hf_token = os.environ.get('HF_TOKEN', '')
-        if not hf_token:
-            print("HF_TOKEN not set, using enhanced clustering diarization")
-            return enhanced_diarization(audio_path, num_speakers)
+    result_container = []
 
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token
-        )
+    def run_diarization():
+        try:
+            from pyannote.audio import Pipeline
+            import torch
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        pipeline = pipeline.to(device)
+            hf_token = os.environ.get('HF_TOKEN', '')
+            if not hf_token:
+                print("HF_TOKEN not set, using enhanced clustering diarization")
+                result_container.append(enhanced_diarization(audio_path, num_speakers))
+                return
 
-        # pyannote 支持重叠语音检测
-        diarization = pipeline(audio_path)
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                use_auth_token=hf_token
+            )
 
-        speaker_segments = []
-        for segment, _, speaker in diarization.itertracks(yield_label=True):
-            speaker_segments.append({
-                'start': round(segment.start, 2),
-                'end': round(segment.end, 2),
-                'speaker': speaker
-            })
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            pipeline = pipeline.to(device)
 
-        return speaker_segments
+            diarization = pipeline(audio_path)
 
-    except Exception as e:
-        print(f"Speaker diarization failed: {e}, using enhanced clustering")
-        return enhanced_diarization(audio_path, num_speakers)
+            speaker_segments = []
+            for segment, _, speaker in diarization.itertracks(yield_label=True):
+                speaker_segments.append({
+                    'start': round(segment.start, 2),
+                    'end': round(segment.end, 2),
+                    'speaker': speaker
+                })
+
+            result_container.append(speaker_segments)
+
+        except Exception as e:
+            print(f"Speaker diarization failed: {e}, using enhanced clustering")
+            try:
+                result_container.append(enhanced_diarization(audio_path, num_speakers))
+            except Exception as e2:
+                print(f"Enhanced diarization also failed: {e2}")
+                result_container.append([])
+
+    thread = threading.Thread(target=run_diarization)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout=timeout)
+
+    if result_container:
+        return result_container[0]
+    else:
+        print(f"Speaker diarization timeout ({timeout}s), skipping")
+        return []
 
 
 def enhanced_diarization(audio_path, num_speakers=2):
     """
-    增强的说话人分离：基于频谱特征 + MFCC + 聚类（优化版）
+    增强的说话人分离：基于MFCC + 聚类（性能优化版）
     支持交替发言和基本的同时发言检测
     """
+    import time
+    t0 = time.time()
+    
     import librosa
     from sklearn.cluster import AgglomerativeClustering
     from sklearn.preprocessing import StandardScaler
 
     y, sr = librosa.load(audio_path, sr=16000)
     duration = len(y) / sr
+    print(f"  [diarization] audio loaded: {duration:.1f}s, {time.time()-t0:.1f}s")
 
-    # 调整参数加快速度
-    hop_length = 1024  # 增大步长，减少帧数
+    # 增大步长大幅减少帧数，提升速度
+    hop_length = 2048
     n_fft = 2048
 
-    # 1. 只提取 MFCC 特征（最有效），跳过其他频谱特征
+    # 1. 只提取 MFCC 特征
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, hop_length=hop_length, n_fft=n_fft)
+    print(f"  [diarization] MFCC extracted: {mfcc.shape}, {time.time()-t0:.1f}s")
 
     # 2. 标准化
     scaler = StandardScaler()
     features_scaled = scaler.fit_transform(mfcc.T)
+    print(f"  [diarization] features scaled: {features_scaled.shape}, {time.time()-t0:.1f}s")
 
-    # 3. 使用层次聚类（比KMeans更适合说话人分离）
-    estimated_speakers = estimate_num_speakers(features_scaled, num_speakers)
+    # 3. 直接使用指定说话人数量，跳过耗时的silhouette评估
+    estimated_speakers = num_speakers
 
     clustering = AgglomerativeClustering(
         n_clusters=estimated_speakers,
         linkage='ward'
     )
     labels = clustering.fit_predict(features_scaled)
+    print(f"  [diarization] clustering done: {time.time()-t0:.1f}s")
 
     # 4. 构建说话人段落
     speaker_segments = build_segments(labels, hop_length, sr, duration)
 
     # 5. 合并过短段
     speaker_segments = merge_short_segments(speaker_segments)
+    print(f"  [diarization] total: {time.time()-t0:.1f}s, segments: {len(speaker_segments)}")
 
     return speaker_segments
 

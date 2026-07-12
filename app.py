@@ -184,16 +184,20 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
 
         update_progress(10, '正在转写音频...')
         print(f'Meeting {meeting_id}: starting transcription...')
+        import time as _time
+        _t0 = _time.time()
         from modules.whisper_utils import transcribe_with_fix
         result = transcribe_with_fix(whisper_model, audio_path, language='zh')
         full_text = result['text']
-        print(f'Meeting {meeting_id}: transcription done, text length: {len(full_text)}')
+        print(f'Meeting {meeting_id}: transcription done in {_time.time()-_t0:.1f}s, text length: {len(full_text)}')
 
         update_progress(40, '正在进行说话人分离...')
         speaker_segments = []
         if enable_diarization:
             try:
+                _t1 = _time.time()
                 speaker_segments = speaker_diarization_simple(audio_path)
+                print(f'Meeting {meeting_id}: diarization done in {_time.time()-_t1:.1f}s')
             except Exception as e:
                 print(f'Speaker diarization failed: {e}')
 
@@ -224,19 +228,27 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
                 db.session.add(transcription)
             db.session.commit()
 
+            _t2 = _time.time()
             update_progress(55, '正在提取关键词...')
             keywords = extract_keywords(full_text, top_n=10)
+            print(f'Meeting {meeting_id}: keywords done in {_time.time()-_t2:.1f}s')
             
+            _t3 = _time.time()
             update_progress(65, '正在分析主题...')
             topics = analyze_topic(full_text)
+            print(f'Meeting {meeting_id}: topics done in {_time.time()-_t3:.1f}s')
             
+            _t4 = _time.time()
             update_progress(75, '正在生成会议摘要...')
             print(f'=== About to call generate_summary, text length: {len(full_text)}')
             summary = generate_summary(full_text, max_length=300)
             print(f'=== generate_summary returned: {summary[:100]}')
+            print(f'Meeting {meeting_id}: summary done in {_time.time()-_t4:.1f}s')
             
+            _t5 = _time.time()
             update_progress(80, '正在分析情绪...')
             sentiment = analyze_sentiment(full_text)
+            print(f'Meeting {meeting_id}: sentiment done in {_time.time()-_t5:.1f}s')
 
             audio_quality = None
             if enable_diarization:

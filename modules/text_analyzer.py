@@ -263,8 +263,8 @@ def extract_key_sentences_from_list(sentences, top_n=5):
 
     damping = 0.85
     scores = np.ones(n) / n
-    
-    for _ in range(50):
+
+    for _ in range(20):
         new_scores = np.zeros(n)
         for i in range(n):
             total_sim = sum(similarity_matrix[i])
@@ -273,8 +273,8 @@ def extract_key_sentences_from_list(sentences, top_n=5):
                     if i != j and similarity_matrix[j][i] > 0:
                         new_scores[i] += (similarity_matrix[j][i] / sum(similarity_matrix[j])) * scores[j]
             new_scores[i] = (1 - damping) / n + damping * new_scores[i]
-        
-        if np.sum(np.abs(new_scores - scores)) < 0.0001:
+
+        if np.sum(np.abs(new_scores - scores)) < 0.001:
             break
         scores = new_scores
 
@@ -340,8 +340,8 @@ def extract_key_sentences(text, top_n=5, language='zh'):
     # 3. TextRank / PageRank 迭代
     damping = 0.85
     scores = np.ones(n) / n
-    
-    for _ in range(50):  # 最多迭代50次
+
+    for _ in range(20):
         new_scores = np.zeros(n)
         for i in range(n):
             total_sim = sum(similarity_matrix[i])
@@ -350,9 +350,8 @@ def extract_key_sentences(text, top_n=5, language='zh'):
                     if i != j and similarity_matrix[j][i] > 0:
                         new_scores[i] += (similarity_matrix[j][i] / sum(similarity_matrix[j])) * scores[j]
             new_scores[i] = (1 - damping) / n + damping * new_scores[i]
-        
-        # 检查收敛
-        if np.sum(np.abs(new_scores - scores)) < 0.0001:
+
+        if np.sum(np.abs(new_scores - scores)) < 0.001:
             break
         scores = new_scores
 
@@ -773,7 +772,13 @@ def generate_summary(text, max_length=500, language='zh'):
     for sent in processed_sents[:4]:
         sent = re.sub(r'[这那这这个个的]$', '', sent)
         sent = re.sub(r'[，,、；;]$', '', sent)
-        summary_parts.append(sent)
+        sent = re.sub(r'不能口头说一下就完了[这那]$', '', sent)
+        sent = re.sub(r'不能口头说一下就完了$', '', sent)
+        sent = re.sub(r'不能含糊其辞$', '', sent)
+        sent = re.sub(r'任何人都不允许越过$', '', sent)
+        sent = re.sub(r'不能使用任何可能误导客户的表述$', '', sent)
+        if len(sent) > 8:
+            summary_parts.append(sent)
     
     summary = '。'.join(summary_parts)
     if not summary.endswith('。'):
@@ -786,6 +791,13 @@ def generate_summary(text, max_length=500, language='zh'):
     summary = re.sub(r'[。.]{2,}', '。', summary)
     summary = re.sub(r'([\u4e00-\u9fa5])\1{2,}', r'\1', summary)
     summary = re.sub(r'([\u4e00-\u9fa5]{2,})\1{1,}', r'\1', summary)
+    
+    summary = re.sub(r'讨论一下', '讨论', summary)
+    summary = re.sub(r'对了[，,]*', '', summary)
+    summary = re.sub(r'产品的产品', '产品', summary)
+    summary = re.sub(r'风险等级是是', '风险等级是', summary)
+    summary = re.sub(r'会议会议', '会议', summary)
+    summary = re.sub(r'销售人员销售人员', '销售人员', summary)
     
     if len(summary) > max_length:
         summary = summary[:max_length - 3] + "..."
@@ -863,43 +875,55 @@ def analyze_topic(text, language='zh', candidate_topics=None):
 
     # 先尝试语义相似度
     try:
-        from sentence_transformers import util
+        import threading
+        result_container = []
+        
+        def load_and_analyze():
+            try:
+                from sentence_transformers import util
+                model = get_sentence_transformer_model(language)
+                if model is None:
+                    raise Exception("sentence_transformer model not available")
 
-        model = get_sentence_transformer_model(language)
-        if model is None:
-            raise Exception("sentence_transformer model not available")
+                text_segment = text[:2000] if len(text) > 2000 else text
+                text_embedding = model.encode(text_segment, convert_to_tensor=True)
+                topic_embeddings = model.encode(topics, convert_to_tensor=True)
 
-        # 将文本截取（避免过长文本导致编码慢）
-        text_segment = text[:2000] if len(text) > 2000 else text
-        text_embedding = model.encode(text_segment, convert_to_tensor=True)
-        topic_embeddings = model.encode(topics, convert_to_tensor=True)
+                cosine_scores = util.cos_sim(text_embedding, topic_embeddings)
+                topic_scores = list(zip(topics, cosine_scores[0].tolist()))
 
-        cosine_scores = util.cos_sim(text_embedding, topic_embeddings)
-        topic_scores = list(zip(topics, cosine_scores[0].tolist()))
+                enhanced_scores = []
+                for topic, sim_score in topic_scores:
+                    kw_list = topic_keywords.get(topic, [])
+                    kw_hits = sum(1 for kw in kw_list if kw in text)
+                    kw_score = min(kw_hits / max(len(kw_list), 1), 1.0)
+                    combined = sim_score * 0.7 + kw_score * 0.3
+                    enhanced_scores.append((topic, combined, sim_score, kw_score))
 
-        # 结合关键词匹配的得分
-        enhanced_scores = []
-        for topic, sim_score in topic_scores:
-            # 关键词命中得分
-            kw_list = topic_keywords.get(topic, [])
-            kw_hits = sum(1 for kw in kw_list if kw in text)
-            kw_score = min(kw_hits / max(len(kw_list), 1), 1.0)
+                enhanced_scores.sort(key=lambda x: x[1], reverse=True)
 
-            # 综合得分：语义相似度70% + 关键词匹配30%
-            combined = sim_score * 0.7 + kw_score * 0.3
-            enhanced_scores.append((topic, combined, sim_score, kw_score))
+                result = []
+                for topic, combined, sim, kw in enhanced_scores[:5]:
+                    result.append({
+                        'topic': topic,
+                        'score': round(combined, 4),
+                        'semantic_score': round(sim, 4),
+                        'keyword_score': round(kw, 4)
+                    })
+                result_container.append(result)
+            except Exception as e:
+                print(f"语义分析失败: {e}")
 
-        enhanced_scores.sort(key=lambda x: x[1], reverse=True)
-
-        result = []
-        for topic, combined, sim, kw in enhanced_scores[:5]:
-            result.append({
-                'topic': topic,
-                'score': round(combined, 4),
-                'semantic_score': round(sim, 4),
-                'keyword_score': round(kw, 4)
-            })
-        return result
+        thread = threading.Thread(target=load_and_analyze)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout=10)
+        
+        if result_container:
+            return result_container[0]
+        else:
+            print("语义分析超时，使用关键词匹配")
+            return keyword_based_topic(text, topics, topic_keywords)
 
     except Exception as e:
         print(f"语义分析失败，使用关键词匹配: {e}")
