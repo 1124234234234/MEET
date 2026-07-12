@@ -178,6 +178,128 @@ def extract_keywords(text, top_n=10, language='zh'):
         return [{'word': kw, 'frequency': freq, 'score': freq / len(filtered_words)} for kw, freq in keywords]
 
 
+def _smart_segment(text):
+    """
+    智能分句：处理无标点或标点不全的中文文本
+    优先使用现有标点，不足时基于词汇和模式进行补充分句
+    """
+    text = text.strip()
+    if not text:
+        return []
+    
+    raw_sentences = re.split(r'[。！？!?\n]', text)
+    raw_sentences = [s.strip() for s in raw_sentences if s.strip() and len(s.strip()) > 5]
+    
+    if len(raw_sentences) >= 8:
+        return raw_sentences
+    
+    sentence_break_words = [
+        '我认为', '我觉得', '我建议', '我同意', '我强调', '我补充',
+        '另外，', '另外', '还有，', '还有', '对了，', '对了',
+        '而且', '但是', '不过', '所以', '因此',
+        '第一，', '第一', '第二，', '第二', '第三，', '第三',
+        '第四，', '第四', '第五，', '第五',
+        '首先', '其次', '最后',
+        '这款', '这个产品', '那这个',
+        '好的，', '好的',
+        '必须', '要求', '禁止', '需要', '建议', '决定',
+        '会议', '讨论', '总结',
+        '今天我们', '今天',
+        '我们禁止', '我们必须', '我们要求', '我们决定', '我们建议',
+        '提醒客户', '提醒大家',
+    ]
+    
+    result = []
+    for sent in raw_sentences:
+        if len(sent) < 40:
+            result.append(sent)
+            continue
+        
+        sub_parts = [sent]
+        for word in sentence_break_words:
+            new_parts = []
+            for part in sub_parts:
+                if len(part) < 40:
+                    new_parts.append(part)
+                    continue
+                split_parts = re.split(f'(?={re.escape(word)})', part)
+                new_parts.extend([p for p in split_parts if p.strip()])
+            sub_parts = new_parts
+        
+        for part in sub_parts:
+            part = part.strip('，,、；; ')
+            if len(part) > 8:
+                result.append(part)
+    
+    result = [s for s in result if len(s) > 10]
+    return result if result else raw_sentences
+
+
+def extract_key_sentences_from_list(sentences, top_n=5):
+    """
+    从句子列表中提取关键句 - 基于TextRank算法
+    """
+    if len(sentences) <= top_n:
+        return sentences
+
+    sentence_words = []
+    for sent in sentences:
+        words = [w for w in jieba.lcut(sent) if len(w) > 1 and w not in STOPWORDS_ZH]
+        sentence_words.append(words)
+
+    n = len(sentences)
+    similarity_matrix = np.zeros((n, n))
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            common = len(set(sentence_words[i]) & set(sentence_words[j]))
+            shorter = min(len(sentence_words[i]), len(sentence_words[j]))
+            if shorter > 0:
+                sim = common / shorter
+            else:
+                sim = 0
+            similarity_matrix[i][j] = sim
+            similarity_matrix[j][i] = sim
+
+    damping = 0.85
+    scores = np.ones(n) / n
+    
+    for _ in range(50):
+        new_scores = np.zeros(n)
+        for i in range(n):
+            total_sim = sum(similarity_matrix[i])
+            if total_sim > 0:
+                for j in range(n):
+                    if i != j and similarity_matrix[j][i] > 0:
+                        new_scores[i] += (similarity_matrix[j][i] / sum(similarity_matrix[j])) * scores[j]
+            new_scores[i] = (1 - damping) / n + damping * new_scores[i]
+        
+        if np.sum(np.abs(new_scores - scores)) < 0.0001:
+            break
+        scores = new_scores
+
+    for i in range(n):
+        position = i / n
+        if position < 0.2:
+            scores[i] *= 1.3
+        elif position > 0.8:
+            scores[i] *= 1.1
+
+    all_text = ''.join(sentences)
+    all_keywords = extract_keywords(all_text, top_n=20)
+    keyword_set = {kw['word'] for kw in all_keywords}
+
+    for i, sent_words in enumerate(sentence_words):
+        keyword_hits = sum(1 for w in sent_words if w in keyword_set)
+        if keyword_hits > 0:
+            scores[i] *= (1 + keyword_hits * 0.1)
+
+    ranked_indices = sorted(range(n), key=lambda x: scores[x], reverse=True)
+    selected_indices = sorted(ranked_indices[:top_n])
+
+    return [sentences[i] for i in selected_indices]
+
+
 def extract_key_sentences(text, top_n=5, language='zh'):
     """
     提取关键句子 - 基于TextRank算法
@@ -540,20 +662,17 @@ def _extract_core_points(sentences, keywords_set, max_points=3):
 
 def generate_summary(text, max_length=500, language='zh'):
     """
-    生成会议摘要：使用Sumy LSA算法提取关键句，转换为第三人称叙述
+    生成会议摘要：使用TextRank提取关键句，转换为第三人称叙述
+    预处理：智能分句，确保句子边界正确
     """
     print(f'=== generate_summary called === text length: {len(text)}')
     if not text or len(text.strip()) < 20:
         return "内容过短，无法生成摘要"
 
-    try:
-        parser = PlaintextParser.from_string(text, Tokenizer('chinese'))
-        summarizer = get_sumy_summarizer()
-        sumy_sents = summarizer(parser.document, sentences_count=5)
-        key_sents = [str(s) for s in sumy_sents]
-    except Exception as e:
-        print(f'Sumy error: {e}')
-        key_sents = extract_key_sentences(text, top_n=5, language=language)
+    segmented_text = _smart_segment(text)
+    print(f'=== segmented sentences: {len(segmented_text)} ===')
+    
+    key_sents = extract_key_sentences_from_list(segmented_text, top_n=10)
     
     if not key_sents:
         return text[:max_length]
@@ -573,7 +692,7 @@ def generate_summary(text, max_length=500, language='zh'):
         greeting_patterns = [
             r'好的$', r'谢谢$', r'大家好', r'散会', r'明白了', r'知道了',
             r'还有什么问题', r'没了', r'没有了', r'没问题', r'可以', r'行',
-            r'请.*介绍', r'请.*来讲',
+            r'请.*介绍', r'请.*来讲', r'今天就到这里',
         ]
         for gp in greeting_patterns:
             if re.search(gp, narrative):
@@ -609,8 +728,21 @@ def generate_summary(text, max_length=500, language='zh'):
         key = narrative[:15]
         if key in seen:
             continue
-        seen.add(key)
         
+        is_dup = False
+        for existing in processed_sents:
+            common_chars = len(set(narrative) & set(existing))
+            total_chars = len(set(narrative) | set(existing))
+            if total_chars > 0 and common_chars / total_chars > 0.5:
+                is_dup = True
+                break
+            if narrative[:10] in existing or existing[:10] in narrative:
+                is_dup = True
+                break
+        if is_dup:
+            continue
+        
+        seen.add(key)
         processed_sents.append(narrative)
     
     if not processed_sents:
@@ -639,6 +771,8 @@ def generate_summary(text, max_length=500, language='zh'):
             summary_parts.append(opening)
     
     for sent in processed_sents[:4]:
+        sent = re.sub(r'[这那这这个个的]$', '', sent)
+        sent = re.sub(r'[，,、；;]$', '', sent)
         summary_parts.append(sent)
     
     summary = '。'.join(summary_parts)
