@@ -270,7 +270,24 @@ def _convert_to_narrative(sentence):
     
     text = sentence.strip()
     
+    text = re.sub(r'各位同事大家好[，,。.]?', '', text)
+    text = re.sub(r'大家好[，,。.]?', '', text)
+    text = re.sub(r'好的，谢谢大家[，,。.]?', '', text)
+    text = re.sub(r'谢谢大家[，,。.]?', '', text)
+    text = re.sub(r'今天我们来讨论', '会议讨论', text)
+    text = re.sub(r'今天我们讨论', '会议讨论', text)
+    text = re.sub(r'我有个问题', '有观点提出疑问', text)
+    text = re.sub(r'我有个疑问', '有观点提出疑问', text)
+    text = re.sub(r'^还有[，,]', '', text)
+    text = re.sub(r'^对[，,]', '', text)
+    text = re.sub(r'^嗯[，,]', '', text)
+    text = re.sub(r'^好的[，,]', '', text)
+    text = re.sub(r'^那么[，,]', '', text)
+    text = re.sub(r'^所以[，,]', '', text)
+    text = re.sub(r'^因此[，,]', '', text)
+    
     patterns = [
+        (r'我们公司', '公司'),
         (r'我认为', '有观点认为'),
         (r'我觉得', '有观点认为'),
         (r'我们认为', '会议认为'),
@@ -298,22 +315,36 @@ def _convert_to_narrative(sentence):
         text = re.sub(pattern, replacement, text)
     
     text = re.sub(r'发言者们', '参会人员', text)
+    text = re.sub(r'参会人员参会人员', '参会人员', text)
+    text = re.sub(r'发言者发言者', '发言者', text)
     text = re.sub(r'[“”"\']', '', text)
     
-    return text
+    text = re.sub(r'^而且\s*', '', text)
+    text = re.sub(r'^不过\s*', '', text)
+    text = re.sub(r'而且公司', '公司', text)
+    text = re.sub(r'而且会议', '会议', text)
+    text = re.sub(r'而且发言者', '发言者', text)
+    text = re.sub(r'而且有', '有', text)
+    text = re.sub(r'而且这', '这', text)
+    text = re.sub(r'不过公司', '公司', text)
+    text = re.sub(r'不过会议', '会议', text)
+    text = re.sub(r'不过发言者', '发言者', text)
+    
+    return text.strip()
 
 
 def generate_summary(text, max_length=500, language='zh'):
     """
     生成会议摘要：提取关键句，转换为第三人称叙述，自然流畅地组织成摘要
     """
+    print(f'=== generate_summary called === text length: {len(text)}')
     if not text or len(text.strip()) < 20:
         return "内容过短，无法生成摘要"
 
-    key_sentences = extract_key_sentences(text, top_n=5, language=language)
-    key_sentences = [s for s in key_sentences if not _is_low_quality_sentence(s)]
+    sentences = re.split(r'[。！？.!?]', text)
+    sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 10]
 
-    if not key_sentences:
+    if not sentences:
         return text[:max_length]
 
     topics = analyze_topic(text, language=language)
@@ -321,19 +352,32 @@ def generate_summary(text, max_length=500, language='zh'):
     action_items = extract_action_items(text, language=language)
 
     summary_parts = []
-    seen_phrases = set()
+    seen_content = set()
 
     if topics and topics[0]['score'] > 0:
         top_topics = [t['topic'] for t in topics[:3] if t['score'] > 0]
         if top_topics:
             topic_str = '、'.join(top_topics)
             if keywords:
-                kw_str = '、'.join([kw['word'] for kw in keywords[:5]])
+                kw_str = '、'.join([kw['word'] for kw in keywords[:5] if kw['word'] != '还有'])
                 opening = f"本次会议就{topic_str}相关事项进行讨论，重点涉及{kw_str}等方面"
             else:
                 opening = f"本次会议就{topic_str}相关事项进行讨论"
             summary_parts.append(opening)
-            seen_phrases.add(topic_str)
+            seen_content.add(topic_str)
+
+    important_patterns = [
+        r'决定',
+        r'必须',
+        r'要求',
+        r'禁止',
+        r'需要',
+        r'应当',
+        r'风险',
+        r'合规',
+        r'强调',
+        r'明确',
+    ]
 
     action_text_set = set()
     if action_items:
@@ -343,49 +387,77 @@ def generate_summary(text, max_length=500, language='zh'):
             if item_clean and len(item_clean) > 6:
                 action_text_set.add(item_clean)
 
-    for sent in key_sentences:
+    content_sentences = []
+    for sent in sentences:
         narrative = _convert_to_narrative(sent)
         if not narrative or len(narrative) < 12:
             continue
         
-        overlaps_with_action = False
-        for action_text in action_text_set:
-            if action_text in narrative or narrative in action_text:
-                overlaps_with_action = True
+        is_greeting = False
+        greeting_patterns = [
+            r'好的', r'谢谢', r'大家好', r'散会', 
+            r'还有什么问题', r'没了', r'没有了', r'明白了',
+            r'请.*介绍', r'请.*来讲', r'请.*来说',
+            r'我介绍一下', r'我来说一下', r'我来讲一下',
+        ]
+        for gp in greeting_patterns:
+            if re.search(gp, narrative):
+                is_greeting = True
                 break
-        if overlaps_with_action:
+        if is_greeting:
             continue
         
         is_duplicate = False
-        for phrase in seen_phrases:
-            if phrase in narrative or narrative in phrase:
+        for existing in seen_content:
+            if narrative[:15] in existing or existing[:15] in narrative:
                 is_duplicate = True
                 break
         if is_duplicate:
             continue
         
-        seen_phrases.add(narrative)
-        
-        skip_patterns = [
-            r'今天会议讨论了',
-            r'本次会议讨论了',
-            r'会议讨论了',
-            r'主要内容[：:]',
-            r'会议主要内容',
-        ]
-        should_skip = False
-        for pattern in skip_patterns:
-            if re.search(pattern, narrative):
-                should_skip = True
+        overlaps_action = False
+        for action_text in action_text_set:
+            if action_text[:10] in narrative or narrative[:10] in action_text:
+                overlaps_action = True
                 break
-        if should_skip:
+        if overlaps_action:
             continue
         
-        summary_parts.append(narrative)
+        has_importance = False
+        for pattern in important_patterns:
+            if re.search(pattern, narrative):
+                has_importance = True
+                break
+        
+        content_sentences.append((narrative, has_importance))
+        seen_content.add(narrative)
 
-    if action_text_set:
-        action_str = '；'.join(list(action_text_set)[:3])
-        summary_parts.append(f"会议明确{action_str}")
+    important_sentences = [s for s, imp in content_sentences if imp]
+    other_sentences = [s for s, imp in content_sentences if not imp]
+
+    selected = important_sentences[:3] + other_sentences[:2]
+    selected = list(dict.fromkeys(selected))[:4]
+
+    for sent in selected:
+        summary_parts.append(sent)
+
+    if action_items:
+        unique_actions = []
+        for item in action_items[:3]:
+            item_clean = re.sub(r'^(要求|必须|应当|应该|需要)[，,]?', '', item)
+            item_clean = _convert_to_narrative(item_clean)
+            if item_clean and len(item_clean) > 6:
+                is_dup = False
+                for existing in unique_actions:
+                    if item_clean[:15] in existing or existing[:15] in item_clean:
+                        is_dup = True
+                        break
+                if not is_dup:
+                    unique_actions.append(item_clean)
+        
+        if unique_actions:
+            action_str = '；'.join(unique_actions)
+            summary_parts.append(f"会议明确{action_str}")
 
     summary = '。'.join(summary_parts)
     
@@ -397,10 +469,12 @@ def generate_summary(text, max_length=500, language='zh'):
 
     summary = re.sub(r'[，,]+', '，', summary)
     summary = re.sub(r'[。.]+', '。', summary)
+    summary = re.sub(r'会议明确会议明确', '会议明确', summary)
 
     if len(summary) > max_length:
         summary = summary[:max_length - 3] + "..."
 
+    print(f'=== generate_summary result ===: {summary[:100]}...')
     return summary
 
 

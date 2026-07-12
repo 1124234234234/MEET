@@ -156,7 +156,7 @@ def create_meeting():
     )
     db.session.add(meeting)
     db.session.commit()
-    print(f'Meeting created with ID: {meeting.id}')
+    print(f'Meeting created with ID: {meeting.id}', flush=True)
 
     thread = threading.Thread(
         target=_process_meeting_async,
@@ -164,7 +164,7 @@ def create_meeting():
     )
     thread.daemon = True
     thread.start()
-    print('Async thread started')
+    print('Async thread started', flush=True)
 
     return jsonify({'code': 200, 'message': '分析已开始', 'meeting_id': meeting.id})
 
@@ -231,7 +231,9 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
             topics = analyze_topic(full_text)
             
             update_progress(75, '正在生成会议摘要...')
+            print(f'=== About to call generate_summary, text length: {len(full_text)}')
             summary = generate_summary(full_text, max_length=300)
+            print(f'=== generate_summary returned: {summary[:100]}')
             
             update_progress(80, '正在分析情绪...')
             sentiment = analyze_sentiment(full_text)
