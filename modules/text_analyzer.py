@@ -383,6 +383,9 @@ def _convert_to_narrative(sentence):
     text = re.sub(r'公司公司', '公司', text)
     text = re.sub(r'[“”"\']', '', text)
     
+    text = re.sub(r'([\u4e00-\u9fa5])\1{2,}', r'\1', text)
+    text = re.sub(r'([\u4e00-\u9fa5]{2,})\1{1,}', r'\1', text)
+    
     text = re.sub(r'，而且', '，', text)
     text = re.sub(r'，不过', '，但', text)
     text = re.sub(r'，那么', '，', text)
@@ -525,25 +528,78 @@ def _extract_core_points(sentences, keywords_set, max_points=3):
 
 def generate_summary(text, max_length=500, language='zh'):
     """
-    生成会议摘要：三段式结构（主题引入 + 核心讨论 + 决议行动）
-    确保第三人称叙述，无重复，无口语化表达
+    生成会议摘要：使用TextRank提取关键句，转换为第三人称叙述
     """
     print(f'=== generate_summary called === text length: {len(text)}')
     if not text or len(text.strip()) < 20:
         return "内容过短，无法生成摘要"
 
-    sentences = re.split(r'[。！？.!?]', text)
-    sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 8]
-
-    if not sentences:
+    key_sents = extract_key_sentences(text, top_n=5, language=language)
+    
+    if not key_sents:
         return text[:max_length]
 
-    topics = analyze_topic(text, language=language)
-    keywords = extract_keywords(text, top_n=10, language=language)
-    action_items = extract_action_items(text, language=language)
-    
+    keywords = extract_keywords(text, top_n=8, language=language)
     keywords_set = set(kw['word'] for kw in keywords) if keywords else set()
-
+    
+    processed_sents = []
+    seen = set()
+    
+    for sent in key_sents:
+        narrative = _convert_to_narrative(sent)
+        
+        if not narrative or len(narrative) < 12:
+            continue
+        
+        is_greeting = False
+        greeting_patterns = [
+            r'好的$', r'谢谢$', r'大家好', r'散会', r'明白了', r'知道了',
+            r'还有什么问题', r'没了', r'没有了', r'没问题', r'可以', r'行',
+            r'请.*介绍', r'请.*来讲',
+        ]
+        for gp in greeting_patterns:
+            if re.search(gp, narrative):
+                is_greeting = True
+                break
+        if is_greeting:
+            continue
+        
+        if narrative.endswith('？') or narrative.endswith('?'):
+            continue
+        
+        question_words = ['怎么', '什么', '谁', '哪', '几', '多少', '为什么', '是否', '吗']
+        has_question = False
+        for qw in question_words:
+            if qw in narrative:
+                has_question = True
+                break
+        if has_question:
+            continue
+        
+        negative_patterns = [
+            r'承诺.*保本', r'承诺.*收益', r'保证.*收益', r'绝对安全',
+            r'无风险', r'零风险', r'稳赚不赔', r'放心推荐',
+        ]
+        is_negative = False
+        for np in negative_patterns:
+            if re.search(np, narrative):
+                is_negative = True
+                break
+        if is_negative:
+            continue
+        
+        key = narrative[:15]
+        if key in seen:
+            continue
+        seen.add(key)
+        
+        processed_sents.append(narrative)
+    
+    if not processed_sents:
+        return text[:max_length]
+    
+    topics = analyze_topic(text, language=language)
+    
     summary_parts = []
     
     if topics and topics[0]['score'] > 0:
@@ -553,105 +609,31 @@ def generate_summary(text, max_length=500, language='zh'):
         
         if top_topics:
             topic_str = '与'.join(top_topics)
-            
             if keywords:
                 kw_list = [kw['word'] for kw in keywords[:6] if kw['word'] != '还有' and kw['word'] not in top_topics]
                 if kw_list:
                     kw_str = '、'.join(kw_list[:4])
-                    opening = f"本次会议围绕{topic_str}展开讨论，涉及{kw_str}等方面内容"
+                    opening = f"本次会议围绕{topic_str}展开讨论，涉及{kw_str}等方面"
                 else:
                     opening = f"本次会议围绕{topic_str}展开讨论"
             else:
                 opening = f"本次会议围绕{topic_str}展开讨论"
-            
             summary_parts.append(opening)
     
-    core_points = _extract_core_points(sentences, keywords_set, max_points=3)
+    for sent in processed_sents[:4]:
+        summary_parts.append(sent)
     
-    action_text_set = set()
-    if action_items:
-        for item in action_items:
-            item_clean = re.sub(r'^(要求|必须|应当|应该|需要|决定|明确)[，,]?\s*', '', item)
-            item_clean = _convert_to_narrative(item_clean)
-            if item_clean and len(item_clean) > 8:
-                action_text_set.add(item_clean)
-    
-    if core_points:
-        filtered_points = []
-        for point in core_points:
-            overlaps_action = False
-            for action_text in action_text_set:
-                if action_text[:12] in point or point[:12] in action_text:
-                    overlaps_action = True
-                    break
-                overlap = len(set(point) & set(action_text)) / max(len(set(point)), 1)
-                if overlap > 0.5:
-                    overlaps_action = True
-                    break
-            if not overlaps_action:
-                filtered_points.append(point)
-        core_points = filtered_points
-    
-    if core_points:
-        if len(core_points) >= 1:
-            point1 = core_points[0]
-            if not re.match(r'^(会议|有观点|发言者|参会人员|讨论|分析|研究)', point1):
-                point1 = f"会议讨论指出，{point1}"
-            summary_parts.append(point1)
-        
-        if len(core_points) >= 2:
-            point2 = core_points[1]
-            if not re.match(r'^(会议|有观点|发言者|参会人员|讨论|分析|研究)', point2):
-                point2 = f"有观点提出，{point2}"
-            summary_parts.append(point2)
-    
-    if action_items:
-        processed_actions = []
-        seen_actions = set()
-        
-        for item in action_items:
-            item_clean = re.sub(r'^(要求|必须|应当|应该|需要|决定|明确)[，,]?\s*', '', item)
-            item_clean = _convert_to_narrative(item_clean)
-            
-            if not item_clean or len(item_clean) < 8:
-                continue
-            
-            key = item_clean[:15]
-            if key in seen_actions:
-                continue
-            seen_actions.add(key)
-            
-            if len(item_clean) < 10:
-                continue
-            
-            processed_actions.append(item_clean)
-            if len(processed_actions) >= 3:
-                break
-        
-        if processed_actions:
-            action_str = '；'.join(processed_actions)
-            summary_parts.append(f"会议明确要求{action_str}")
-    
-    if not summary_parts:
-        key_sents = extract_key_sentences(text, top_n=3, language=language)
-        if key_sents:
-            summary = '。'.join(key_sents) + '。'
-        else:
-            summary = text[:max_length]
-    else:
-        summary = '。'.join(summary_parts)
-        if not summary.endswith('。'):
-            summary += '。'
+    summary = '。'.join(summary_parts)
+    if not summary.endswith('。'):
+        summary += '。'
     
     from modules.whisper_utils import fix_traditional_chinese
     summary = fix_traditional_chinese(summary)
     
     summary = re.sub(r'[，,]{2,}', '，', summary)
     summary = re.sub(r'[。.]{2,}', '。', summary)
-    summary = re.sub(r'会议明确要求会议明确要求', '会议明确要求', summary)
-    summary = re.sub(r'会议明确会议明确', '会议明确', summary)
-    summary = re.sub(r'会议讨论指出，会议', '会议', summary)
-    summary = re.sub(r'有观点提出，有观点', '有观点', summary)
+    summary = re.sub(r'([\u4e00-\u9fa5])\1{2,}', r'\1', summary)
+    summary = re.sub(r'([\u4e00-\u9fa5]{2,})\1{1,}', r'\1', summary)
     
     if len(summary) > max_length:
         summary = summary[:max_length - 3] + "..."
