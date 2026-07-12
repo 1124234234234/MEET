@@ -1,6 +1,20 @@
 import json
 from datetime import datetime
 
+_compliance_model = None
+
+def _get_compliance_model():
+    global _compliance_model
+    if _compliance_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _compliance_model = SentenceTransformer('all-MiniLM-L6-v2')
+            print('Loaded compliance semantic similarity model')
+        except Exception as e:
+            print(f"Failed to load compliance model: {e}")
+            return None
+    return _compliance_model
+
 
 def calculate_compliance_score(transcription_text, knowledge_base_items, score_weights=None, transcription_segments=None):
     """
@@ -208,9 +222,12 @@ def assess_risk_severity(keyword):
 def compute_semantic_similarity(text1, text2):
     """计算语义相似度"""
     try:
-        from sentence_transformers import SentenceTransformer, util
+        from sentence_transformers import util
         
-        model = SentenceTransformer('all-MiniLM-L6-v2')
+        model = _get_compliance_model()
+        if model is None:
+            return simple_similarity(text1, text2)
+        
         embedding1 = model.encode(text1, convert_to_tensor=True)
         embedding2 = model.encode(text2, convert_to_tensor=True)
         

@@ -718,10 +718,10 @@
                             <div style="margin-bottom:10px;">等级: <span class="score-badge score-${getScoreClass(c.score_level)}">${c.score_level}</span></div>
                             <div style="margin-bottom:10px;">
                                 <div style="font-size:12px; color:#999; margin-bottom:4px;">评分明细</div>
-                                <div style="font-size:13px;">语义相似度: ${c.components.semantic_similarity?.toFixed(1) || 0}分</div>
-                                <div style="font-size:13px;">要点覆盖: ${c.components.point_coverage?.toFixed(1) || 0}分</div>
-                                <div style="font-size:13px;">风险检测: ${c.components.risk_detection?.toFixed(1) || 0}分</div>
-                                <div style="font-size:13px;">关键词命中: ${c.components.keyword_matching?.toFixed(1) || 0}分</div>
+                                <div style="font-size:13px;">语义相似度: ${(c.components && c.components.semantic_similarity)?.toFixed(1) || 0}分</div>
+                                <div style="font-size:13px;">要点覆盖: ${(c.components && c.components.point_coverage)?.toFixed(1) || 0}分</div>
+                                <div style="font-size:13px;">风险检测: ${(c.components && c.components.risk_detection)?.toFixed(1) || 0}分</div>
+                                <div style="font-size:13px;">关键词命中: ${(c.components && c.components.keyword_matching)?.toFixed(1) || 0}分</div>
                             </div>
                             ${c.missing_points?.length ? `<div style="margin-bottom:10px;"><span style="font-size:12px;color:#999;">遗漏要点:</span> ${c.missing_points.map(p => `<span class="missing-item">${p}</span>`).join(' ')}</div>` : ''}
                             ${c.risk_keywords?.length && !c.risk_time_markers?.length ? `<div style="margin-bottom:10px;"><span style="font-size:12px;color:#999;">风险内容:</span> ${c.risk_keywords.map(r => `<span class="risk-item">${r}</span>`).join(' ')}</div>` : ''}
