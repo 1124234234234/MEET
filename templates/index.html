@@ -485,6 +485,13 @@
             const diarization = document.getElementById('enable-diarization').checked;
             const compliance = document.getElementById('enable-compliance').checked;
             
+            console.log('analyzeAudio called:', { title, diarization, compliance, currentFile });
+            
+            if (!currentFile) {
+                alert('请先选择音频文件');
+                return;
+            }
+            
             const formData = new FormData();
             formData.append('audio_file', currentFile);
             formData.append('meeting_title', title);
@@ -498,21 +505,26 @@
             document.getElementById('analysis-progress-percent').textContent = '0%';
             
             try {
+                console.log('Sending POST to:', `${API_BASE}/meetings`);
                 const response = await fetch(`${API_BASE}/meetings`, {
                     method: 'POST',
                     body: formData
                 });
+                console.log('Response status:', response.status);
                 const result = await response.json();
+                console.log('Response:', result);
                 
                 if (result.code === 200) {
                     const meetingId = result.meeting_id;
+                    console.log('Meeting ID:', meetingId);
                     await pollAnalysisProgress(meetingId);
                 } else {
                     alert(result.message);
+                    document.getElementById('loading').classList.remove('show');
                 }
             } catch (error) {
+                console.error('Analysis error:', error);
                 alert('分析失败: ' + error.message);
-            } finally {
                 document.getElementById('loading').classList.remove('show');
             }
         }
@@ -579,8 +591,8 @@
 
             document.getElementById('result-topic').textContent = data.topics[0]?.topic || '--';
 
-            if (data.compliance) {
-                document.getElementById('result-score').textContent = data.compliance.total_score;
+            if (data.compliance_report) {
+                document.getElementById('result-score').textContent = data.compliance_report.total_score;
             }
 
             // 摘要展示
@@ -659,8 +671,8 @@
 
             // 合规报告
             const compDetail = document.getElementById('compliance-detail');
-            if (data.compliance) {
-                const c = data.compliance;
+            if (data.compliance_report) {
+                const c = data.compliance_report;
                 
                 // 风险时间节点列表
                 let riskMarkersHtml = '';

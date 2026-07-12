@@ -265,10 +265,15 @@ def _convert_person(text):
     """
     将第一人称转换为第三人称，将对话式语气转换为叙述式
     """
+    if not text:
+        return ""
+    
     # 第一人称转换
     text = text.replace('我', '发言者')
     text = text.replace('我们', '会议')
     text = text.replace('咱们', '参会人员')
+    text = text.replace('大家', '参会人员')
+    text = text.replace('同事', '参会人员')
     
     # 问候语和开场白过滤
     greeting_patterns = [
@@ -282,12 +287,15 @@ def _convert_person(text):
         r'最后[，。]',
         r'好的，今天的会议就到这里',
         r'散会[，。！]',
+        r'谢谢大家[，。！]',
+        r'感谢大家[，。！]',
+        r'非常感谢[，。！]',
     ]
     for pattern in greeting_patterns:
         text = re.sub(pattern, '', text)
     
     # 语气词去除
-    text = re.sub(r'[呢吧啊哦嗯呀哈嘿]', '', text)
+    text = re.sub(r'[呢吧啊哦嗯呀哈嘿嘛咯]', '', text)
     
     # 去除多余标点和空白
     text = re.sub(r'[，,]+', '，', text)
@@ -304,14 +312,12 @@ def _summarize_content(key_sentences):
     if not key_sentences:
         return ""
     
-    # 转换为第三人称
     converted = [_convert_person(s) for s in key_sentences]
     converted = [s for s in converted if s and len(s) > 8]
     
     if not converted:
         return ""
     
-    # 提取关键信息点并重新组织
     summary_parts = []
     
     # 1. 识别讨论的主题/对象
@@ -330,7 +336,7 @@ def _summarize_content(key_sentences):
                     topics_found.append(topic)
     
     if topics_found:
-        summary_parts.append(f"会议围绕{'、'.join(topics_found)}等议题进行讨论")
+        summary_parts.append(f"围绕{'、'.join(topics_found)}等议题进行讨论")
     
     # 2. 识别主要观点/决定
     decision_patterns = [
@@ -365,35 +371,30 @@ def _summarize_content(key_sentences):
                     requirements_found.append(content)
     
     if requirements_found:
-        summary_parts.append("会议强调" + "；".join(requirements_found))
+        summary_parts.append("强调" + "；".join(requirements_found))
     
     # 4. 如果没有匹配到模式，用更智能的方式总结
     if not summary_parts:
-        # 提取核心名词和动词
         all_text = "。".join(converted)
         keywords = extract_keywords(all_text, top_n=5)
         keyword_str = "、".join([kw['word'] for kw in keywords])
         
-        # 从句子中提取关键动作
         action_words = ['讨论', '分析', '决定', '要求', '提出', '确认', '明确', '达成']
         actions_found = []
         for sent in converted:
             for action in action_words:
                 if action in sent:
-                    # 提取动作后的内容
                     idx = sent.find(action)
                     action_part = sent[idx:idx+30].strip()
                     if action_part not in actions_found:
                         actions_found.append(action_part)
         
         if actions_found:
-            summary_parts.append(f"会议主要内容：{keyword_str}；" + "；".join(actions_found[:2]))
+            summary_parts.append(f"会议讨论了{keyword_str}等内容" + "；".join(actions_found[:2]))
         else:
-            # 直接使用关键句，但重新组织语言
             if len(converted) <= 2:
-                summary_parts.append("会议主要内容：" + "；".join(converted))
+                summary_parts.append("会议讨论了" + "；".join(converted))
             else:
-                # 合并相似内容
                 merged = []
                 for sent in converted:
                     is_duplicate = False
@@ -403,7 +404,7 @@ def _summarize_content(key_sentences):
                             break
                     if not is_duplicate:
                         merged.append(sent)
-                summary_parts.append("会议主要内容：" + "；".join(merged[:3]))
+                summary_parts.append("会议讨论了" + "；".join(merged[:2]))
     
     return "。".join(summary_parts)
 

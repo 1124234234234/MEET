@@ -3,6 +3,9 @@ import os
 class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'meeting-analysis-secret-key'
     
+    TEMPLATES_AUTO_RELOAD = True
+    SEND_FILE_MAX_AGE_DEFAULT = 0
+    
     UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
     ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a'}
     

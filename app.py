@@ -109,10 +109,12 @@ def get_meeting(meeting_id):
 
 @app.route('/api/meetings', methods=['POST'])
 def create_meeting():
+    print('create_meeting called')
     if 'audio_file' not in request.files:
         return jsonify({'code': 400, 'message': 'No audio file provided'}), 400
     
     audio_file = request.files['audio_file']
+    print(f'Got audio file: {audio_file.filename}')
     if audio_file.filename == '':
         return jsonify({'code': 400, 'message': 'No audio file selected'}), 400
     
@@ -128,14 +130,15 @@ def create_meeting():
     original_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{file_id}_original.{file_ext}')
     processed_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{file_id}_processed.wav')
 
+    print(f'Saving file to: {original_path}')
     audio_file.save(original_path)
+    print('File saved')
 
-    # 检查音频文件大小（避免空文件导致Whisper崩溃）
     file_size = os.path.getsize(original_path)
-    if file_size < 1024:  # 小于1KB认为是空文件或无效文件
+    print(f'File size: {file_size} bytes')
+    if file_size < 1024:
         return jsonify({'code': 400, 'message': '音频文件太小或为空，请上传有效的音频文件'}), 400
 
-    # 音频预处理（可选，默认跳过以加快速度）
     if enable_diarization:
         try:
             preprocess_audio(original_path, processed_path)
@@ -153,14 +156,15 @@ def create_meeting():
     )
     db.session.add(meeting)
     db.session.commit()
+    print(f'Meeting created with ID: {meeting.id}')
 
-    # 异步分析
     thread = threading.Thread(
         target=_process_meeting_async,
         args=(meeting.id, processed_path, enable_diarization, enable_compliance)
     )
     thread.daemon = True
     thread.start()
+    print('Async thread started')
 
     return jsonify({'code': 200, 'message': '分析已开始', 'meeting_id': meeting.id})
 
