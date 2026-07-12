@@ -10,6 +10,18 @@ import re
 import numpy as np
 import math
 
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.nlp.tokenizers import Tokenizer
+from sumy.summarizers.lsa import LsaSummarizer
+
+_sumy_summarizer = None
+
+def get_sumy_summarizer():
+    global _sumy_summarizer
+    if _sumy_summarizer is None:
+        _sumy_summarizer = LsaSummarizer()
+    return _sumy_summarizer
+
 # 缓存sentence_transformers模型，避免每次分析都重新加载
 _sentence_transformer_models = {}
 
@@ -528,19 +540,25 @@ def _extract_core_points(sentences, keywords_set, max_points=3):
 
 def generate_summary(text, max_length=500, language='zh'):
     """
-    生成会议摘要：使用TextRank提取关键句，转换为第三人称叙述
+    生成会议摘要：使用Sumy LSA算法提取关键句，转换为第三人称叙述
     """
     print(f'=== generate_summary called === text length: {len(text)}')
     if not text or len(text.strip()) < 20:
         return "内容过短，无法生成摘要"
 
-    key_sents = extract_key_sentences(text, top_n=5, language=language)
+    try:
+        parser = PlaintextParser.from_string(text, Tokenizer('chinese'))
+        summarizer = get_sumy_summarizer()
+        sumy_sents = summarizer(parser.document, sentences_count=5)
+        key_sents = [str(s) for s in sumy_sents]
+    except Exception as e:
+        print(f'Sumy error: {e}')
+        key_sents = extract_key_sentences(text, top_n=5, language=language)
     
     if not key_sents:
         return text[:max_length]
 
     keywords = extract_keywords(text, top_n=8, language=language)
-    keywords_set = set(kw['word'] for kw in keywords) if keywords else set()
     
     processed_sents = []
     seen = set()
