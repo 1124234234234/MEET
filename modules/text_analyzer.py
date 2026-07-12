@@ -310,17 +310,18 @@ def generate_summary(text, max_length=500, language='zh'):
     if not text or len(text.strip()) < 20:
         return "内容过短，无法生成摘要"
 
-    key_sentences = extract_key_sentences(text, top_n=6, language=language)
+    key_sentences = extract_key_sentences(text, top_n=5, language=language)
     key_sentences = [s for s in key_sentences if not _is_low_quality_sentence(s)]
 
     if not key_sentences:
         return text[:max_length]
 
     topics = analyze_topic(text, language=language)
-    keywords = extract_keywords(text, top_n=8, language=language)
+    keywords = extract_keywords(text, top_n=6, language=language)
     action_items = extract_action_items(text, language=language)
 
     summary_parts = []
+    seen_phrases = set()
 
     if topics and topics[0]['score'] > 0:
         top_topics = [t['topic'] for t in topics[:3] if t['score'] > 0]
@@ -328,42 +329,63 @@ def generate_summary(text, max_length=500, language='zh'):
             topic_str = '、'.join(top_topics)
             if keywords:
                 kw_str = '、'.join([kw['word'] for kw in keywords[:5]])
-                summary_parts.append(f"本次会议就{topic_str}相关事项进行讨论，重点涉及{kw_str}等方面")
+                opening = f"本次会议就{topic_str}相关事项进行讨论，重点涉及{kw_str}等方面"
             else:
-                summary_parts.append(f"本次会议就{topic_str}相关事项进行讨论")
+                opening = f"本次会议就{topic_str}相关事项进行讨论"
+            summary_parts.append(opening)
+            seen_phrases.add(topic_str)
 
-    narrative_sentences = []
-    seen_content = set()
-    
+    action_text_set = set()
+    if action_items:
+        for item in action_items:
+            item_clean = re.sub(r'^(要求|必须|应当|应该|需要)[，,]?', '', item)
+            item_clean = _convert_to_narrative(item_clean)
+            if item_clean and len(item_clean) > 6:
+                action_text_set.add(item_clean)
+
     for sent in key_sentences:
         narrative = _convert_to_narrative(sent)
-        if not narrative or len(narrative) < 10:
+        if not narrative or len(narrative) < 12:
             continue
         
-        content_key = narrative[:20]
-        if content_key in seen_content:
+        overlaps_with_action = False
+        for action_text in action_text_set:
+            if action_text in narrative or narrative in action_text:
+                overlaps_with_action = True
+                break
+        if overlaps_with_action:
             continue
-        seen_content.add(content_key)
         
-        narrative_sentences.append(narrative)
-
-    if narrative_sentences:
-        if len(narrative_sentences) <= 3:
-            summary_parts.extend(narrative_sentences)
-        else:
-            summary_parts.extend(narrative_sentences[:3])
-
-    if action_items:
-        clean_actions = []
-        for item in action_items[:4]:
-            item = re.sub(r'^(要求|必须|应当|应该|需要)[，,]?', '', item)
-            item = _convert_to_narrative(item)
-            if item and len(item) > 5:
-                clean_actions.append(item)
+        is_duplicate = False
+        for phrase in seen_phrases:
+            if phrase in narrative or narrative in phrase:
+                is_duplicate = True
+                break
+        if is_duplicate:
+            continue
         
-        if clean_actions:
-            action_str = '；'.join(clean_actions)
-            summary_parts.append(f"要求{action_str}")
+        seen_phrases.add(narrative)
+        
+        skip_patterns = [
+            r'今天会议讨论了',
+            r'本次会议讨论了',
+            r'会议讨论了',
+            r'主要内容[：:]',
+            r'会议主要内容',
+        ]
+        should_skip = False
+        for pattern in skip_patterns:
+            if re.search(pattern, narrative):
+                should_skip = True
+                break
+        if should_skip:
+            continue
+        
+        summary_parts.append(narrative)
+
+    if action_text_set:
+        action_str = '；'.join(list(action_text_set)[:3])
+        summary_parts.append(f"会议明确{action_str}")
 
     summary = '。'.join(summary_parts)
     
