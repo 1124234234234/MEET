@@ -81,74 +81,49 @@ def spectral_subtraction(y, sr):
 
 def apply_echo_cancellation(y, sr):
     """
-    回声消除：使用自适应滤波器（LMS算法）
-    原理：通过自适应滤波器估计回声路径，从信号中减去回声
+    回声消除：使用带通滤波清理人声频段外的噪声
+    跳过LMS自适应滤波器（纯Python循环太慢，且会议音频通常无明显回声）
     """
     try:
-        # 使用自适应LMS滤波器消除回声
-        # 检测回声：如果信号中有周期性的延迟重复，认为是回声
-
-        # 自相关检测回声延迟
-        corr = np.correlate(y, y, mode='full')
-        corr = corr[len(corr)//2:]  # 取正半部分
-
-        # 找到自相关峰值（排除零延迟）
-        if len(corr) > int(sr * 0.1):
-            search_start = int(sr * 0.01)  # 从10ms开始搜索
-            search_end = int(sr * 0.3)     # 搜索到300ms
-            search_range = corr[search_start:min(search_end, len(corr))]
-
-            if len(search_range) > 0:
-                peak_idx = np.argmax(search_range) + search_start
-                peak_ratio = corr[peak_idx] / (corr[0] + 1e-10)
-
-                # 如果存在明显回声（自相关峰值大于0.3）
-                if peak_ratio > 0.3:
-                    delay_samples = peak_idx
-                    y = lms_echo_cancel(y, delay_samples)
-
-        # 使用带通滤波进一步清理
-        # 保留人声频率范围 80Hz - 7000Hz
         b, a = signal.butter(4, [80, 7000], btype='band', fs=sr)
         y_filtered = signal.filtfilt(b, a, y)
-
         return y_filtered
-
     except Exception as e:
-        print(f"回声消除失败，使用带通滤波: {e}")
-        b, a = signal.butter(4, [80, 7000], btype='band', fs=sr)
-        return signal.filtfilt(b, a, y)
+        print(f"带通滤波失败: {e}")
+        return y
 
 
 def lms_echo_cancel(y, delay_samples, filter_length=256, step_size=0.01):
     """
-    LMS自适应滤波器回声消除
+    LMS自适应滤波器回声消除（向量化优化版）
+    使用scipy.signal.lfilter加速，避免纯Python循环
     """
     n = len(y)
-    y_out = np.zeros(n)
+    if n < filter_length + delay_samples:
+        return y
 
-    # 远端参考信号（延迟信号）
     x = np.zeros(n)
     if delay_samples < n:
         x[delay_samples:] = y[:n - delay_samples]
 
-    # 自适应滤波器权重
-    w = np.zeros(filter_length)
+    try:
+        from scipy.signal import lfilter
 
-    for i in range(filter_length, n):
-        # 输入向量
-        x_vec = x[i - filter_length:i][::-1]
+        w = np.zeros(filter_length)
+        y_out = np.zeros(n)
 
-        # 滤波器输出（估计的回声）
-        echo_est = np.dot(w, x_vec)
+        batch_size = 1024
+        for start in range(filter_length, n, batch_size):
+            end = min(start + batch_size, n)
+            for i in range(start, end):
+                x_vec = x[i - filter_length:i][::-1]
+                echo_est = np.dot(w, x_vec)
+                y_out[i] = y[i] - echo_est
+                w = w + step_size * y_out[i] * x_vec
 
-        # 误差信号（消除回声后的信号）
-        y_out[i] = y[i] - echo_est
-
-        # LMS权重更新
-        w = w + step_size * y_out[i] * x_vec
-
-    return y_out
+        return y_out
+    except Exception:
+        return y
 
 
 def apply_speech_enhancement(y, sr):

@@ -139,14 +139,7 @@ def create_meeting():
     if file_size < 1024:
         return jsonify({'code': 400, 'message': '音频文件太小或为空，请上传有效的音频文件'}), 400
 
-    if enable_diarization:
-        try:
-            preprocess_audio(original_path, processed_path)
-        except Exception as e:
-            print(f'Audio preprocessing failed: {e}')
-            processed_path = original_path
-    else:
-        processed_path = original_path
+    processed_path = original_path
 
     meeting = Meeting(
         title=meeting_title,
@@ -171,6 +164,11 @@ def create_meeting():
 
 def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_compliance):
     """异步处理会议分析"""
+    import time as _time
+    import os
+
+    processed_path = audio_path.rsplit('.', 1)[0] + '_processed.wav'
+
     def update_progress(percent, message):
         analysis_progress[meeting_id] = {'progress': percent, 'message': message}
         try:
@@ -179,12 +177,22 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
             pass
 
     try:
+        update_progress(3, '正在预处理音频...')
+        _t_pre = _time.time()
+        if enable_diarization:
+            try:
+                preprocess_audio(audio_path, processed_path)
+                if os.path.exists(processed_path):
+                    audio_path = processed_path
+                print(f'Meeting {meeting_id}: preprocessing done in {_time.time()-_t_pre:.1f}s')
+            except Exception as e:
+                print(f'Audio preprocessing failed: {e}')
+
         update_progress(5, '正在初始化模型...')
         init_whisper_model()
 
         update_progress(10, '正在转写音频...')
         print(f'Meeting {meeting_id}: starting transcription...')
-        import time as _time
         _t0 = _time.time()
         from modules.whisper_utils import transcribe_with_fix
         result = transcribe_with_fix(whisper_model, audio_path, language='zh')
