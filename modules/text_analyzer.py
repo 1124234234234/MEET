@@ -22,6 +22,144 @@ def get_sumy_summarizer():
         _sumy_summarizer = LsaSummarizer()
     return _sumy_summarizer
 
+
+# ========== mT5摘要大模型 ==========
+_mt5_model = None
+_mt5_tokenizer = None
+
+def get_mt5_model():
+    """加载并缓存mT5摘要大模型"""
+    global _mt5_model, _mt5_tokenizer
+    if _mt5_model is not None:
+        return _mt5_model, _mt5_tokenizer
+
+    try:
+        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+        import os
+        os.environ['HF_HUB_OFFLINE'] = '1'
+
+        print("[摘要模型] 正在加载mT5摘要大模型...")
+        _mt5_tokenizer = AutoTokenizer.from_pretrained('csebuetnlp/mT5_multilingual_XLSum', legacy=True)
+        _mt5_model = AutoModelForSeq2SeqLM.from_pretrained('csebuetnlp/mT5_multilingual_XLSum')
+        _mt5_model.eval()
+        print(f"[摘要模型] mT5加载完成 ({sum(p.numel() for p in _mt5_model.parameters())/1e6:.0f}M参数)")
+        return _mt5_model, _mt5_tokenizer
+    except Exception as e:
+        print(f"[摘要模型] mT5加载失败: {e}")
+        _mt5_model = None
+        _mt5_tokenizer = None
+        return None, None
+
+
+def _is_hallucinated(summary, source_text):
+    """检测摘要中的幻觉内容（与原文严重不符的部分）"""
+    # 新闻式幻觉特征
+    news_patterns = [
+        r'周[一二三四五六日]\(', r'\d+月\d+日', r'《[^》]+》',
+        r'报道', r'网络版', r'记者', r'消息人士',
+        r'央行', r'证监会', r'银保监',  # 除非原文提到
+    ]
+    for p in news_patterns:
+        if re.search(p, summary) and p not in source_text:
+            return True
+
+    # 检查摘要中关键实体是否在原文中
+    summary_entities = set()
+    for w in jieba.lcut(summary):
+        if len(w) >= 3 and w not in STOPWORDS_ZH:
+            summary_entities.add(w)
+
+    source_entities = set()
+    for w in jieba.lcut(source_text):
+        if len(w) >= 3 and w not in STOPWORDS_ZH:
+            source_entities.add(w)
+
+    # 如果摘要中有超过60%的3字以上实体不在原文中，判定为幻觉
+    if summary_entities:
+        novel_ratio = len(summary_entities - source_entities) / len(summary_entities)
+        if novel_ratio > 0.6:
+            return True
+
+    return False
+
+
+def _mt5_summarize(text, max_length=200):
+    """使用mT5大模型生成摘要"""
+    model, tokenizer = get_mt5_model()
+    if model is None:
+        return None
+
+    try:
+        inputs = tokenizer(text, return_tensors='pt', max_length=512, truncation=True)
+
+        import torch
+        with torch.no_grad():
+            outputs = model.generate(
+                inputs['input_ids'],
+                max_length=max_length,
+                min_length=30,
+                num_beams=4,
+                early_stopping=True,
+                no_repeat_ngram_size=3,
+                length_penalty=1.0,
+            )
+
+        result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return result.strip()
+    except Exception as e:
+        print(f"[摘要模型] mT5生成失败: {e}")
+        return None
+
+
+def _mt5_polish_sentences(sentences, source_text):
+    """
+    使用mT5大模型逐句精炼：将口语化句子转为正式书面语
+    比全文摘要更稳定，幻觉风险更低
+    """
+    model, tokenizer = get_mt5_model()
+    if model is None or not sentences:
+        return sentences
+
+    polished = []
+    import torch
+
+    for sent in sentences:
+        if len(sent) < 15:
+            polished.append(sent)
+            continue
+
+        try:
+            # 让模型精炼单句，限制输出长度避免幻觉
+            inputs = tokenizer(sent, return_tensors='pt', max_length=256, truncation=True)
+            with torch.no_grad():
+                outputs = model.generate(
+                    inputs['input_ids'],
+                    max_length=len(sent) + 20,  # 不超过原句太多
+                    min_length=max(10, len(sent) // 2),
+                    num_beams=3,
+                    early_stopping=True,
+                    no_repeat_ngram_size=2,
+                    length_penalty=0.8,
+                )
+            result = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+
+            # 验证：精炼结果不能有幻觉
+            if result and len(result) > 10 and not _is_hallucinated(result, source_text):
+                # 精炼结果应保留原句的核心实体
+                orig_words = set(w for w in jieba.lcut(sent) if len(w) > 1)
+                result_words = set(w for w in jieba.lcut(result) if len(w) > 1)
+                overlap = len(orig_words & result_words) / max(len(orig_words), 1)
+                if overlap > 0.3:  # 至少30%的词重叠
+                    polished.append(result)
+                    continue
+
+            # 精炼失败，保留原句
+            polished.append(sent)
+        except Exception:
+            polished.append(sent)
+
+    return polished
+
 # 缓存sentence_transformers模型，避免每次分析都重新加载
 _sentence_transformer_models = {}
 
@@ -659,15 +797,14 @@ def _extract_core_points(sentences, keywords_set, max_points=3):
     return result
 
 
-def generate_summary(text, max_length=500, language='zh'):
+def generate_summary(text, max_length=500, language='zh', use_model=True):
     """
-    生成会议摘要：基于TextRank + 智能重组 + 第三人称转换
-    改进：
-    1. 使用TextRank提取关键句
-    2. 按主题和逻辑重新组织句子
-    3. 更完善的人称转换和口语化清理
-    4. 结构化输出（背景-讨论内容-结论）
-    5. 强化去重，避免重复内容
+    生成会议摘要：优先使用mT5大模型，降级使用TextRank
+    策略：
+    1. 先用TextRank提取关键句（确保内容准确）
+    2. 尝试用mT5大模型生成精炼摘要
+    3. 如果大模型产生幻觉或失败，降级使用TextRank结果
+    4. 第三人称转换 + 结构化输出
     """
     print(f'=== generate_summary called === text length: {len(text)}')
     if not text or len(text.strip()) < 20:
@@ -675,42 +812,30 @@ def generate_summary(text, max_length=500, language='zh'):
 
     sentences = _smart_segment(text)
     print(f'=== segmented sentences: {len(sentences)} ===')
-    
+
     if len(sentences) <= 2:
         clean_text = _convert_to_narrative(text)
         clean_text = _clean_summary_text(clean_text)
         return clean_text[:max_length]
 
-    # 1. 提取关键词用于辅助
+    # ====== 第一步：TextRank提取关键句（保底方案）======
     keywords = extract_keywords(text, top_n=10, language=language)
     keyword_set = {kw['word'] for kw in keywords} if keywords else set()
-    
-    # 2. 使用TextRank提取关键句子
+
     key_sents = extract_key_sentences_from_list(sentences, top_n=min(15, len(sentences)))
-    
-    # 3. 过滤和转换
+
     processed_sents = []
-    seen_contents = set()
     seen_signatures = set()
-    
+
     for sent in key_sents:
-        # 转换为第三人称
         narrative = _convert_to_narrative(sent)
-        
-        # 清理文本
         narrative = _clean_summary_text(narrative)
-        
-        # 质量检查
         if not _is_summary_quality(narrative, keyword_set):
             continue
-        
-        # 去重检查 - 多重去重
         sig = _get_sentence_signature(narrative)
         if sig in seen_signatures:
             continue
         seen_signatures.add(sig)
-        
-        # 语义去重：和已选句子的相似度
         is_dup = False
         for existing in processed_sents:
             if _sentence_similarity(narrative, existing) > 0.6:
@@ -718,15 +843,11 @@ def generate_summary(text, max_length=500, language='zh'):
                 break
         if is_dup:
             continue
-        
         processed_sents.append(narrative)
-        
-        # 限制核心句数量
         if len(processed_sents) >= 6:
             break
-    
+
     if not processed_sents:
-        # 如果关键句提取失败，直接使用前几句
         fallback_sents = []
         fallback_sigs = set()
         for sent in sentences[:8]:
@@ -739,13 +860,19 @@ def generate_summary(text, max_length=500, language='zh'):
             if len(fallback_sents) >= 5:
                 break
         processed_sents = fallback_sents
-    
-    # 4. 分析主题
+
+    # ====== 第二步：尝试mT5大模型精炼句子 ======
+    if use_model:
+        polished = _mt5_polish_sentences(processed_sents[:6], text)
+        # 如果精炼后句子数量没减少（没出错），使用精炼结果
+        if polished and len(polished) >= len(processed_sents[:6]) - 1:
+            processed_sents = polished
+            print(f'[摘要模型] mT5逐句精炼完成，{len(polished)}句')
+
+    # ====== 第三步：组装最终摘要 ======
     topics = analyze_topic(text, language=language)
-    
-    # 5. 构建结构化摘要
     summary_parts = []
-    
+
     # 开头：会议主题引入
     if topics and topics[0]['score'] > 0:
         top_topics = [t['topic'] for t in topics[:2] if t['score'] > 0.2]
@@ -754,30 +881,27 @@ def generate_summary(text, max_length=500, language='zh'):
             kw_list = [kw['word'] for kw in keywords[:8] if kw['word'] not in top_topics and len(kw['word']) > 1]
             if kw_list:
                 kw_desc = '、'.join(kw_list[:5])
-                opening = f"本次会议围绕{topic_desc}展开讨论，涉及{kw_desc}等核心内容"
+                opening = f"本次会议围绕{topic_desc}展开讨论，涉及{kw_desc}等核心内容。"
             else:
-                opening = f"本次会议围绕{topic_desc}展开讨论"
+                opening = f"本次会议围绕{topic_desc}展开讨论。"
             summary_parts.append(opening)
-    
-    # 中间：核心讨论内容（去掉和开头重复的）
+
+    # 核心讨论内容
     core_sents = []
     for sent in processed_sents:
-        # 跳过和开头高度相似的句子
         if summary_parts and _sentence_similarity(sent, summary_parts[0]) > 0.4:
             continue
-        # 跳过过短的句子
         if len(sent) < 15:
             continue
         core_sents.append(sent)
         if len(core_sents) >= 4:
             break
-    
+
     summary_parts.extend(core_sents)
-    
-    # 结尾：行动项或结论
+
+    # 行动项或结论
     action_items = extract_action_items(text, language=language)
     if action_items:
-        # 过滤掉和核心句重复的行动项
         unique_actions = []
         for ai in action_items[:3]:
             ai_narrative = _convert_to_narrative(ai)
@@ -789,20 +913,17 @@ def generate_summary(text, max_length=500, language='zh'):
                     break
             if not is_dup and len(ai_clean) > 10:
                 unique_actions.append(ai_clean)
-        
         if unique_actions:
             action_desc = '；'.join(unique_actions[:2])
             summary_parts.append(f"会议明确{action_desc}")
-    
-    # 6. 组装和清理
+
     summary = '。'.join(summary_parts)
+
     summary = _clean_final_summary(summary)
-    
-    # 7. 繁体清理
+
     from modules.whisper_utils import fix_traditional_chinese
     summary = fix_traditional_chinese(summary)
-    
-    # 8. 长度控制
+
     if len(summary) > max_length:
         summary = summary[:max_length - 1]
         last_period = summary.rfind('。')
@@ -810,10 +931,10 @@ def generate_summary(text, max_length=500, language='zh'):
             summary = summary[:last_period + 1]
         else:
             summary = summary[:max_length - 3] + "..."
-    
+
     if not summary.endswith('。') and len(summary) < max_length and len(summary) > 5:
         summary += '。'
-    
+
     print(f'=== generate_summary result ===: {summary[:200]}...')
     return summary
 
