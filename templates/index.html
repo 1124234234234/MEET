@@ -281,6 +281,11 @@
                             <label>必传要点 (逗号分隔)</label>
                             <input type="text" id="kb-points" placeholder="要点1,要点2,要点3">
                         </div>
+                        <div class="form-group">
+                            <label>上传政策文件 (.txt/.pdf/.docx/.doc)</label>
+                            <input type="file" id="kb-file" accept=".txt,.pdf,.docx,.doc" style="width:100%;">
+                            <button class="btn btn-secondary" onclick="uploadKnowledgeFile()" style="margin-top:8px;">上传文件</button>
+                        </div>
                         <button class="btn btn-primary" onclick="addKnowledgeItem()">添加条目</button>
                     </div>
                 </div>
@@ -1068,6 +1073,35 @@
             const result = await response.json();
             alert(result.message);
             loadKnowledgeList();
+        }
+
+        async function uploadKnowledgeFile() {
+            const fileInput = document.getElementById('kb-file');
+            const typeSelect = document.getElementById('kb-type');
+            
+            if (!fileInput.files || fileInput.files.length === 0) {
+                alert('请先选择文件');
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('item_type', typeSelect.value);
+            
+            const response = await fetch(`${API_BASE}/knowledge-base`, {
+                method: 'POST',
+                body: formData
+            });
+            const result = await response.json();
+            
+            if (result.code === 200) {
+                alert(`上传成功！\n标题: ${result.parsed.title}\n关键词: ${result.parsed.keywords.join(', ')}\n必传要点: ${result.parsed.required_points.join(', ')}`);
+                loadKnowledgeList();
+                fileInput.value = '';
+            } else {
+                alert(result.message);
+            }
         }
 
         async function loadKnowledgeList() {

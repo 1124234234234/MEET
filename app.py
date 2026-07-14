@@ -385,6 +385,9 @@ def get_knowledge_item(item_id):
 
 @app.route('/api/knowledge-base', methods=['POST'])
 def create_knowledge_item():
+    if 'file' in request.files:
+        return upload_knowledge_file()
+    
     data = request.get_json()
     
     item = KnowledgeBase(
@@ -398,6 +401,58 @@ def create_knowledge_item():
     db.session.commit()
     
     return jsonify({'code': 200, 'message': '创建成功', 'data': item.to_dict()})
+
+
+def upload_knowledge_file():
+    """上传政策文件并自动解析"""
+    file = request.files['file']
+    
+    if not file or file.filename == '':
+        return jsonify({'code': 400, 'message': '请选择文件'}), 400
+    
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in ['.txt', '.pdf', '.docx', '.doc']:
+        return jsonify({'code': 400, 'message': '仅支持 .txt、.pdf、.docx、.doc 格式'}), 400
+    
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
+        file.save(f.name)
+        temp_path = f.name
+    
+    try:
+        from modules.file_parser import parse_policy_file
+        parsed = parse_policy_file(temp_path)
+        
+        item_type = request.form.get('item_type', 'policy')
+        
+        item = KnowledgeBase(
+            title=parsed['title'],
+            content=parsed['content'],
+            item_type=item_type,
+            keywords=json.dumps(parsed['keywords']),
+            required_points=json.dumps(parsed['required_points']),
+            status='active'
+        )
+        db.session.add(item)
+        db.session.commit()
+        
+        return jsonify({
+            'code': 200,
+            'message': '上传成功',
+            'data': item.to_dict(),
+            'parsed': {
+                'title': parsed['title'],
+                'keywords': parsed['keywords'],
+                'required_points': parsed['required_points'],
+                'content_length': len(parsed['content'])
+            }
+        })
+    except Exception as e:
+        print(f'文件解析失败: {e}')
+        return jsonify({'code': 500, 'message': f'文件解析失败: {str(e)}'}), 500
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 @app.route('/api/knowledge-base/<int:item_id>', methods=['PUT'])
 def update_knowledge_item(item_id):
