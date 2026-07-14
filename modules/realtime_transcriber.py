@@ -16,10 +16,11 @@ from flask import current_app
 class RealtimeTranscriber:
     """实时转写器：接收音频流，分段转写，实时合规检查，同时保存音频文件"""
 
-    def __init__(self, whisper_model, language='zh', knowledge_items=None, audio_file_path=None):
+    def __init__(self, whisper_model, language='zh', knowledge_items=None, audio_file_path=None, score_weights=None):
         self.whisper_model = whisper_model
         self.language = language
         self.knowledge_items = knowledge_items or []
+        self.score_weights = score_weights or None
         self.buffer = []
         self.sr = 16000
         self.chunk_duration = 5.0  # 每5秒处理一次
@@ -180,6 +181,7 @@ class RealtimeTranscriber:
             compliance_result = calculate_compliance_score(
                 full_text,
                 self.knowledge_items,
+                score_weights=self.score_weights,
                 transcription_segments=self.transcription_history
             )
             
@@ -235,7 +237,7 @@ def register_socketio_events(socketio, whisper_model):
     def handle_start(data):
         """开始实时转写会话"""
         from flask import request
-        from models import KnowledgeBase
+        from models import KnowledgeBase, ScoreWeight
         
         sid = request.sid
 
@@ -248,18 +250,27 @@ def register_socketio_events(socketio, whisper_model):
         file_id = str(uuid.uuid4())
         audio_file_path = os.path.join(upload_folder, f'{file_id}_realtime.wav')
         
-        # 获取知识库条目
+        # 获取知识库条目和评分权重
         knowledge_items = []
+        score_weights = None
         if enable_compliance:
             from database import db
             with current_app.app_context():
                 knowledge_items = KnowledgeBase.query.filter_by(status='active').all()
+                db_weights = ScoreWeight.query.all()
+                if db_weights:
+                    score_weights = {}
+                    for w in db_weights:
+                        score_weights[w.weight_name] = w.weight_value
+                else:
+                    score_weights = current_app.config.get('SCORE_WEIGHTS')
         
         transcribers[sid] = RealtimeTranscriber(
             whisper_model, 
             language, 
             knowledge_items,
-            audio_file_path=audio_file_path
+            audio_file_path=audio_file_path,
+            score_weights=score_weights
         )
 
         socketio.emit('transcription_started', {
@@ -325,7 +336,8 @@ def register_socketio_events(socketio, whisper_model):
                 full_analysis = _perform_fast_analysis(
                     audio_file_path,
                     transcriber.language,
-                    transcriber.knowledge_items
+                    transcriber.knowledge_items,
+                    transcriber.score_weights
                 )
                 if full_analysis:
                     result.update(full_analysis)
@@ -346,7 +358,7 @@ def register_socketio_events(socketio, whisper_model):
             socketio.emit('error', {'message': '没有活跃的转写会话'}, to=sid)
 
 
-def _perform_full_analysis(audio_path, language, knowledge_items):
+def _perform_full_analysis(audio_path, language, knowledge_items, score_weights=None):
     """
     对录制的音频进行完整分析
     包括：音频预处理、说话人分离、关键词提取、主题分析、摘要生成等
@@ -416,6 +428,7 @@ def _perform_full_analysis(audio_path, language, knowledge_items):
             compliance_result = calculate_compliance_score(
                 full_text,
                 knowledge_items,
+                score_weights=score_weights,
                 transcription_segments=transcriptions
             )
             compliance_result['score_level'] = get_score_level(compliance_result['total_score'])
@@ -437,7 +450,7 @@ def _perform_full_analysis(audio_path, language, knowledge_items):
         return None
 
 
-def _perform_fast_analysis(audio_path, language, knowledge_items):
+def _perform_fast_analysis(audio_path, language, knowledge_items, score_weights=None):
     """
     快速分析（跳过耗时步骤）
     不做音频预处理和说话人分离，直接使用原始音频转写
@@ -475,6 +488,7 @@ def _perform_fast_analysis(audio_path, language, knowledge_items):
             compliance_result = calculate_compliance_score(
                 full_text,
                 knowledge_items,
+                score_weights=score_weights,
                 transcription_segments=transcriptions
             )
             compliance_result['score_level'] = get_score_level(compliance_result['total_score'])

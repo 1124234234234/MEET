@@ -111,11 +111,10 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
     coverage_rate = len(covered_points) / max(len(all_required_points), 1)
     score_components['point_coverage'] = coverage_rate * weights['point_coverage']
     
-    # 3. 风险内容检测（20分）- 增加时间节点标记
+    # 3. 风险内容检测（20分）- 增加时间节点标记和语义层面风险检测
     all_risk_keywords = []
-    risk_categories = {}  # 风险类别
+    risk_categories = {}
     for item in active_items:
-        # 支持 risk_keywords 和 forbidden 类型
         if item.item_type in ['risk_keywords', 'forbidden']:
             keywords = json.loads(item.keywords) if item.keywords else []
             for kw in keywords:
@@ -124,11 +123,10 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
                     risk_categories[kw] = item.title
     
     risk_keywords_found = []
-    risk_time_markers = []  # 风险内容时间节点
+    risk_time_markers = []
     for kw in all_risk_keywords:
         if kw and kw.strip().lower() in transcription_text.lower():
             risk_keywords_found.append(kw)
-            # 找到风险关键词出现的时间节点
             if transcription_segments:
                 time_markers = find_risk_time_markers(kw, transcription_segments)
                 for marker in time_markers:
@@ -141,7 +139,10 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
                         'severity': assess_risk_severity(kw)
                     })
     
-    risk_score = max(0, weights['risk_detection'] - len(risk_keywords_found) * 5)
+    semantic_risks = detect_semantic_risks(transcription_text, transcription_segments)
+    risk_time_markers.extend(semantic_risks)
+    
+    risk_score = max(0, weights['risk_detection'] - len(risk_keywords_found) * 5 - len(semantic_risks) * 3)
     score_components['risk_detection'] = risk_score
     
     # 4. 关键词命中（10分）
@@ -217,6 +218,76 @@ def assess_risk_severity(keyword):
         return 'medium'
     else:
         return 'low'
+
+
+def detect_semantic_risks(text, segments=None):
+    """
+    语义层面的风险检测
+    检测：偏离主题、表述不当、消极负面等内容
+    """
+    risks = []
+    
+    inappropriate_patterns = [
+        (r'肯定会赚|一定赚|稳赚|保本保收益|零风险|无风险|绝对安全', '表述不当', 'high'),
+        (r'忽悠|骗|蒙|糊弄|坑', '表述不当', 'high'),
+        (r'随便说说|无所谓|不用管', '表述不当', 'medium'),
+        (r'不行吧|不太可能|估计悬', '消极负面', 'medium'),
+        (r'太麻烦了|不想做|懒得弄', '消极负面', 'medium'),
+        (r'这东西没用|没必要|浪费时间', '消极负面', 'high'),
+        (r'客户傻|客户不懂|客户好忽悠', '表述不当', 'high'),
+        (r'上级不知道|领导不会查|没人知道', '表述不当', 'high'),
+    ]
+    
+    for pattern, category, severity in inappropriate_patterns:
+        import re
+        if re.search(pattern, text):
+            if segments:
+                for seg in segments:
+                    seg_text = seg.get('text', '')
+                    if re.search(pattern, seg_text):
+                        risks.append({
+                            'keyword': pattern,
+                            'category': category,
+                            'start_time': seg.get('start_time', 0),
+                            'end_time': seg.get('end_time', 0),
+                            'text': seg_text,
+                            'severity': severity
+                        })
+            else:
+                risks.append({
+                    'keyword': pattern,
+                    'category': category,
+                    'start_time': 0,
+                    'end_time': 0,
+                    'text': text[:50],
+                    'severity': severity
+                })
+    
+    negative_sentiment_patterns = [
+        (r'问题太多|麻烦不断|一团糟|混乱', '消极负面', 'high'),
+        (r'没办法|无解|搞不定|束手无策', '消极负面', 'medium'),
+        (r'不乐观|堪忧|危险|隐患', '消极负面', 'medium'),
+        (r'反对意见|抵制|拒绝执行', '消极负面', 'high'),
+        (r'抱怨|不满|牢骚|指责', '消极负面', 'medium'),
+    ]
+    
+    for pattern, category, severity in negative_sentiment_patterns:
+        import re
+        if re.search(pattern, text):
+            if segments:
+                for seg in segments:
+                    seg_text = seg.get('text', '')
+                    if re.search(pattern, seg_text):
+                        risks.append({
+                            'keyword': pattern,
+                            'category': category,
+                            'start_time': seg.get('start_time', 0),
+                            'end_time': seg.get('end_time', 0),
+                            'text': seg_text,
+                            'severity': severity
+                        })
+    
+    return risks
 
 
 def compute_semantic_similarity(text1, text2):

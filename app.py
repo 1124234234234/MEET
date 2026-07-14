@@ -276,7 +276,16 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
                 update_progress(85, '正在进行合规检查...')
                 knowledge_items = KnowledgeBase.query.filter_by(status='active').all()
                 transcription_segments = [t.to_dict() for t in Transcription.query.filter_by(meeting_id=meeting.id).all()]
-                compliance_result = calculate_compliance_score(full_text, knowledge_items, transcription_segments=transcription_segments)
+                
+                score_weights = {}
+                db_weights = ScoreWeight.query.all()
+                if db_weights:
+                    for w in db_weights:
+                        score_weights[w.weight_name] = w.weight_value
+                else:
+                    score_weights = app.config['SCORE_WEIGHTS']
+                
+                compliance_result = calculate_compliance_score(full_text, knowledge_items, score_weights=score_weights, transcription_segments=transcription_segments)
 
                 report = ComplianceReport(
                     meeting_id=meeting.id,
