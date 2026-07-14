@@ -23,7 +23,81 @@ def get_sumy_summarizer():
     return _sumy_summarizer
 
 
-# ========== mT5摘要大模型 ==========
+# ========== Qwen2.5 摘要大模型（主模型，推荐） ==========
+_qwen_model = None
+_qwen_tokenizer = None
+_QWEN_MODEL_PATH = r'd:\games\新建文件夹 (7)\voice-reco\models\Qwen2.5-1.5B-Instruct'
+
+def get_qwen_model():
+    """加载并缓存Qwen2.5-1.5B-Instruct指令模型"""
+    global _qwen_model, _qwen_tokenizer
+    if _qwen_model is not None:
+        return _qwen_model, _qwen_tokenizer
+
+    import os
+    if not os.path.exists(_QWEN_MODEL_PATH):
+        print("[摘要模型] Qwen2.5模型目录不存在")
+        return None, None
+
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        os.environ['HF_HUB_OFFLINE'] = '1'
+
+        print("[摘要模型] 正在加载Qwen2.5-1.5B-Instruct...")
+        _qwen_tokenizer = AutoTokenizer.from_pretrained(_QWEN_MODEL_PATH, local_files_only=True)
+        _qwen_model = AutoModelForCausalLM.from_pretrained(
+            _QWEN_MODEL_PATH,
+            torch_dtype='auto',
+            device_map='cpu',
+            local_files_only=True
+        )
+        _qwen_model.eval()
+        print(f"[摘要模型] Qwen2.5加载完成 ({sum(p.numel() for p in _qwen_model.parameters())/1e6:.0f}M参数)")
+        return _qwen_model, _qwen_tokenizer
+    except Exception as e:
+        print(f"[摘要模型] Qwen2.5加载失败: {e}")
+        _qwen_model = None
+        _qwen_tokenizer = None
+        return None, None
+
+
+def _qwen_summarize(text, max_length=300):
+    """使用Qwen2.5指令模型生成高质量会议摘要"""
+    model, tokenizer = get_qwen_model()
+    if model is None:
+        return None
+
+    try:
+        import torch
+        system_prompt = "你是一个专业的会议摘要助手。请根据给定的会议内容，生成一段简洁、准确、使用第三人称的结构化摘要。要求：1. 使用第三人称叙述，避免'我''我们'等第一人称；2. 客观概括会议核心内容；3. 语言正式、条理清晰；4. 只输出摘要内容，不要额外解释。"
+        user_prompt = f"会议内容：\n{text[:3000]}\n\n请生成会议摘要："
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(prompt, return_tensors='pt', truncation=True, max_length=2048).to(model.device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_length,
+                temperature=0.3,
+                top_p=0.8,
+                do_sample=False,
+                num_beams=1,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        result = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+        return result.strip()
+    except Exception as e:
+        print(f"[摘要模型] Qwen2.5生成失败: {e}")
+        return None
+
+
+# ========== mT5摘要大模型（备选） ==========
 _mt5_model = None
 _mt5_tokenizer = None
 
@@ -869,23 +943,28 @@ def generate_summary(text, max_length=500, language='zh', use_model=True):
                 break
         processed_sents = fallback_sents
 
-    # ====== 第二步：尝试mT5大模型精炼句子 ======
-    model_refined = False
+    # ====== 第二步：尝试大模型生成摘要（Qwen2.5优先，mT5备选） ======
+    model_summary = None
     if use_model:
-        polished = _mt5_polish_sentences(processed_sents[:6], text)
-        # 精炼成功且句子数量合理
-        if polished and len(polished) >= 2 and polished != processed_sents[:6]:
-            processed_sents = polished
-            model_refined = True
+        # 优先Qwen2.5
+        qwen_result = _qwen_summarize(text, max_length=max_length)
+        if qwen_result and len(qwen_result) > 20 and not _is_hallucinated(qwen_result, text):
+            model_summary = qwen_result
+            print(f'[摘要模型] Qwen2.5生成成功: {qwen_result[:80]}...')
+        else:
+            # 备选mT5
+            mt5_result = _mt5_summarize(text[:1500], max_length=200)
+            if mt5_result and len(mt5_result) > 20 and not _is_hallucinated(mt5_result, text):
+                model_summary = mt5_result
+                print(f'[摘要模型] mT5生成成功')
 
     # ====== 第三步：组装最终摘要 ======
     topics = analyze_topic(text, language=language)
 
-    if model_refined:
-        # 大模型精炼成功：精炼结果已经是正式书面语，直接组装
+    if model_summary:
+        # 大模型生成摘要成功：直接使用大模型结果作为主体
         summary_parts = []
 
-        # 开头：会议主题引入
         if topics and topics[0]['score'] > 0:
             top_topics = [t['topic'] for t in topics[:2] if t['score'] > 0.2]
             if top_topics:
@@ -893,12 +972,11 @@ def generate_summary(text, max_length=500, language='zh', use_model=True):
                 opening = f"本次会议围绕{topic_desc}展开讨论。"
                 summary_parts.append(opening)
 
-        # 精炼后的句子直接使用
-        for sent in processed_sents:
-            if len(sent) >= 10:
-                summary_parts.append(sent)
+        # 大模型摘要（已包含第三人称、正式书面语）
+        model_summary_clean = _clean_summary_text(model_summary)
+        summary_parts.append(model_summary_clean)
 
-        summary = '。'.join(summary_parts)
+        summary = ''.join(summary_parts)
     else:
         # TextRank方案：需要第三人称转换和去重
         summary_parts = []
