@@ -661,149 +661,319 @@ def _extract_core_points(sentences, keywords_set, max_points=3):
 
 def generate_summary(text, max_length=500, language='zh'):
     """
-    生成会议摘要：使用TextRank提取关键句，转换为第三人称叙述
-    预处理：智能分句，确保句子边界正确
+    生成会议摘要：基于TextRank + 智能重组 + 第三人称转换
+    改进：
+    1. 使用TextRank提取关键句
+    2. 按主题和逻辑重新组织句子
+    3. 更完善的人称转换和口语化清理
+    4. 结构化输出（背景-讨论内容-结论）
+    5. 强化去重，避免重复内容
     """
     print(f'=== generate_summary called === text length: {len(text)}')
     if not text or len(text.strip()) < 20:
         return "内容过短，无法生成摘要"
 
-    segmented_text = _smart_segment(text)
-    print(f'=== segmented sentences: {len(segmented_text)} ===')
+    sentences = _smart_segment(text)
+    print(f'=== segmented sentences: {len(sentences)} ===')
     
-    key_sents = extract_key_sentences_from_list(segmented_text, top_n=10)
-    
-    if not key_sents:
-        return text[:max_length]
+    if len(sentences) <= 2:
+        clean_text = _convert_to_narrative(text)
+        clean_text = _clean_summary_text(clean_text)
+        return clean_text[:max_length]
 
-    keywords = extract_keywords(text, top_n=8, language=language)
+    # 1. 提取关键词用于辅助
+    keywords = extract_keywords(text, top_n=10, language=language)
+    keyword_set = {kw['word'] for kw in keywords} if keywords else set()
     
+    # 2. 使用TextRank提取关键句子
+    key_sents = extract_key_sentences_from_list(sentences, top_n=min(15, len(sentences)))
+    
+    # 3. 过滤和转换
     processed_sents = []
-    seen = set()
+    seen_contents = set()
+    seen_signatures = set()
     
     for sent in key_sents:
+        # 转换为第三人称
         narrative = _convert_to_narrative(sent)
         
-        if not narrative or len(narrative) < 12:
+        # 清理文本
+        narrative = _clean_summary_text(narrative)
+        
+        # 质量检查
+        if not _is_summary_quality(narrative, keyword_set):
             continue
         
-        is_greeting = False
-        greeting_patterns = [
-            r'好的$', r'谢谢$', r'大家好', r'散会', r'明白了', r'知道了',
-            r'还有什么问题', r'没了', r'没有了', r'没问题', r'可以', r'行',
-            r'请.*介绍', r'请.*来讲', r'今天就到这里',
-        ]
-        for gp in greeting_patterns:
-            if re.search(gp, narrative):
-                is_greeting = True
-                break
-        if is_greeting:
+        # 去重检查 - 多重去重
+        sig = _get_sentence_signature(narrative)
+        if sig in seen_signatures:
             continue
+        seen_signatures.add(sig)
         
-        if narrative.endswith('？') or narrative.endswith('?'):
-            continue
-        
-        question_words = ['怎么', '什么', '谁', '哪', '几', '多少', '为什么', '是否', '吗']
-        has_question = False
-        for qw in question_words:
-            if qw in narrative:
-                has_question = True
-                break
-        if has_question:
-            continue
-        
-        negative_patterns = [
-            r'承诺.*保本', r'承诺.*收益', r'保证.*收益', r'绝对安全',
-            r'无风险', r'零风险', r'稳赚不赔', r'放心推荐',
-        ]
-        is_negative = False
-        for np in negative_patterns:
-            if re.search(np, narrative):
-                is_negative = True
-                break
-        if is_negative:
-            continue
-        
-        key = narrative[:15]
-        if key in seen:
-            continue
-        
+        # 语义去重：和已选句子的相似度
         is_dup = False
         for existing in processed_sents:
-            common_chars = len(set(narrative) & set(existing))
-            total_chars = len(set(narrative) | set(existing))
-            if total_chars > 0 and common_chars / total_chars > 0.5:
-                is_dup = True
-                break
-            if narrative[:10] in existing or existing[:10] in narrative:
+            if _sentence_similarity(narrative, existing) > 0.6:
                 is_dup = True
                 break
         if is_dup:
             continue
         
-        seen.add(key)
         processed_sents.append(narrative)
+        
+        # 限制核心句数量
+        if len(processed_sents) >= 6:
+            break
     
     if not processed_sents:
-        return text[:max_length]
+        # 如果关键句提取失败，直接使用前几句
+        fallback_sents = []
+        fallback_sigs = set()
+        for sent in sentences[:8]:
+            n = _convert_to_narrative(sent)
+            n = _clean_summary_text(n)
+            sig = _get_sentence_signature(n)
+            if len(n) > 15 and sig not in fallback_sigs:
+                fallback_sents.append(n)
+                fallback_sigs.add(sig)
+            if len(fallback_sents) >= 5:
+                break
+        processed_sents = fallback_sents
     
+    # 4. 分析主题
     topics = analyze_topic(text, language=language)
     
+    # 5. 构建结构化摘要
     summary_parts = []
     
+    # 开头：会议主题引入
     if topics and topics[0]['score'] > 0:
-        top_topics = [t['topic'] for t in topics[:2] if t['score'] > 0.3]
-        if not top_topics:
-            top_topics = [t['topic'] for t in topics[:1]]
-        
+        top_topics = [t['topic'] for t in topics[:2] if t['score'] > 0.2]
         if top_topics:
-            topic_str = '与'.join(top_topics)
-            if keywords:
-                kw_list = [kw['word'] for kw in keywords[:6] if kw['word'] != '还有' and kw['word'] not in top_topics]
-                if kw_list:
-                    kw_str = '、'.join(kw_list[:4])
-                    opening = f"本次会议围绕{topic_str}展开讨论，涉及{kw_str}等方面"
-                else:
-                    opening = f"本次会议围绕{topic_str}展开讨论"
+            topic_desc = '与'.join(top_topics)
+            kw_list = [kw['word'] for kw in keywords[:8] if kw['word'] not in top_topics and len(kw['word']) > 1]
+            if kw_list:
+                kw_desc = '、'.join(kw_list[:5])
+                opening = f"本次会议围绕{topic_desc}展开讨论，涉及{kw_desc}等核心内容"
             else:
-                opening = f"本次会议围绕{topic_str}展开讨论"
+                opening = f"本次会议围绕{topic_desc}展开讨论"
             summary_parts.append(opening)
     
-    for sent in processed_sents[:4]:
-        sent = re.sub(r'[这那这这个个的]$', '', sent)
-        sent = re.sub(r'[，,、；;]$', '', sent)
-        sent = re.sub(r'不能口头说一下就完了[这那]$', '', sent)
-        sent = re.sub(r'不能口头说一下就完了$', '', sent)
-        sent = re.sub(r'不能含糊其辞$', '', sent)
-        sent = re.sub(r'任何人都不允许越过$', '', sent)
-        sent = re.sub(r'不能使用任何可能误导客户的表述$', '', sent)
-        if len(sent) > 8:
-            summary_parts.append(sent)
+    # 中间：核心讨论内容（去掉和开头重复的）
+    core_sents = []
+    for sent in processed_sents:
+        # 跳过和开头高度相似的句子
+        if summary_parts and _sentence_similarity(sent, summary_parts[0]) > 0.4:
+            continue
+        # 跳过过短的句子
+        if len(sent) < 15:
+            continue
+        core_sents.append(sent)
+        if len(core_sents) >= 4:
+            break
     
+    summary_parts.extend(core_sents)
+    
+    # 结尾：行动项或结论
+    action_items = extract_action_items(text, language=language)
+    if action_items:
+        # 过滤掉和核心句重复的行动项
+        unique_actions = []
+        for ai in action_items[:3]:
+            ai_narrative = _convert_to_narrative(ai)
+            ai_clean = _clean_summary_text(ai_narrative)
+            is_dup = False
+            for existing in summary_parts:
+                if _sentence_similarity(ai_clean, existing) > 0.5:
+                    is_dup = True
+                    break
+            if not is_dup and len(ai_clean) > 10:
+                unique_actions.append(ai_clean)
+        
+        if unique_actions:
+            action_desc = '；'.join(unique_actions[:2])
+            summary_parts.append(f"会议明确{action_desc}")
+    
+    # 6. 组装和清理
     summary = '。'.join(summary_parts)
-    if not summary.endswith('。'):
-        summary += '。'
+    summary = _clean_final_summary(summary)
     
+    # 7. 繁体清理
     from modules.whisper_utils import fix_traditional_chinese
     summary = fix_traditional_chinese(summary)
     
-    summary = re.sub(r'[，,]{2,}', '，', summary)
-    summary = re.sub(r'[。.]{2,}', '。', summary)
-    summary = re.sub(r'([\u4e00-\u9fa5])\1{2,}', r'\1', summary)
-    summary = re.sub(r'([\u4e00-\u9fa5]{2,})\1{1,}', r'\1', summary)
-    
-    summary = re.sub(r'讨论一下', '讨论', summary)
-    summary = re.sub(r'对了[，,]*', '', summary)
-    summary = re.sub(r'产品的产品', '产品', summary)
-    summary = re.sub(r'风险等级是是', '风险等级是', summary)
-    summary = re.sub(r'会议会议', '会议', summary)
-    summary = re.sub(r'销售人员销售人员', '销售人员', summary)
-    
+    # 8. 长度控制
     if len(summary) > max_length:
-        summary = summary[:max_length - 3] + "..."
+        summary = summary[:max_length - 1]
+        last_period = summary.rfind('。')
+        if last_period > max_length * 0.5:
+            summary = summary[:last_period + 1]
+        else:
+            summary = summary[:max_length - 3] + "..."
+    
+    if not summary.endswith('。') and len(summary) < max_length and len(summary) > 5:
+        summary += '。'
     
     print(f'=== generate_summary result ===: {summary[:200]}...')
     return summary
+
+
+def _sentence_similarity(s1, s2):
+    """计算两个句子的相似度（基于共同词比例）"""
+    if not s1 or not s2:
+        return 0.0
+    
+    words1 = set(w for w in jieba.lcut(s1) if len(w) > 1)
+    words2 = set(w for w in jieba.lcut(s2) if len(w) > 1)
+    
+    if not words1 or not words2:
+        return 0.0
+    
+    common = words1 & words2
+    union = words1 | words2
+    
+    return len(common) / len(union) if union else 0.0
+
+
+def _clean_summary_text(text):
+    """清理摘要文本中的口语化、重复等问题"""
+    if not text:
+        return ""
+    
+    t = text.strip()
+    
+    # 清理开头的口语词
+    opening_patterns = [
+        r'^好的[，,。.\s]*',
+        r'^对[，,。.\s]*',
+        r'^是[，,。.\s]*',
+        r'^没错[，,。.\s]*',
+        r'^明白[了的]*[，,。.\s]*',
+        r'^知道了[，,。.\s]*',
+        r'^嗯[，,。.\s]*',
+        r'^哦[，,。.\s]*',
+        r'^行[，,。.\s]*',
+        r'^可以[，,。.\s]*',
+        r'^还有[，,。.\s]*',
+        r'^另外[，,。.\s]*',
+        r'^而且[，,。.\s]*',
+        r'^但是[，,。.\s]*',
+        r'^不过[，,。.\s]*',
+        r'^那么[，,。.\s]*',
+        r'^所以[，,。.\s]*',
+        r'^因此[，,。.\s]*',
+        r'^因为[，,。.\s]*',
+        r'^其实[，,。.\s]*',
+        r'^然后[，,。.\s]*',
+        r'^接下来[，,。.\s]*',
+        r'^首先[，,。.\s]*',
+        r'^其次[，,。.\s]*',
+        r'^最后[，,。.\s]*',
+        r'^关于[这那]个[，,。.\s]*',
+    ]
+    for p in opening_patterns:
+        t = re.sub(p, '', t)
+    
+    # 清理结尾的口语词
+    ending_patterns = [
+        r'[，,、；;]\s*$',
+        r'[这那][个样种]*$',
+        r'的话$',
+        r'什么的$',
+        r'等等$',
+        r'之类$',
+    ]
+    for p in ending_patterns:
+        t = re.sub(p, '', t)
+    
+    # 清理重复字
+    t = re.sub(r'([\u4e00-\u9fa5])\1{2,}', r'\1', t)
+    t = re.sub(r'([\u4e00-\u9fa5]{2,})\1{1,}', r'\1', t)
+    
+    # 清理重复标点
+    t = re.sub(r'[，,]{2,}', '，', t)
+    t = re.sub(r'[。.]{2,}', '。', t)
+    t = re.sub(r'[、]{2,}', '、', t)
+    
+    # 清理无意义短语
+    t = re.sub(r'讨论一下', '讨论', t)
+    t = re.sub(r'说一下', '说明', t)
+    t = re.sub(r'讲一下', '讲解', t)
+    t = re.sub(r'看一下', '查看', t)
+    t = re.sub(r'对了[，,]*', '', t)
+    t = re.sub(r'产品的产品', '产品', t)
+    t = re.sub(r'风险等级是是', '风险等级是', t)
+    t = re.sub(r'会议会议', '会议', t)
+    t = re.sub(r'销售人员销售人员', '销售人员', t)
+    t = re.sub(r'参会人员参会人员', '参会人员', t)
+    t = re.sub(r'发言者发言者', '发言者', t)
+    t = re.sub(r'公司公司', '公司', t)
+    
+    return t.strip()
+
+
+def _is_summary_quality(sentence, keywords_set):
+    """判断句子是否适合作为摘要内容"""
+    if not sentence or len(sentence) < 12:
+        return False
+    
+    # 过滤纯问候/应答语
+    greetings = [
+        r'^好的$', r'^谢谢', r'^大家好', r'^散会', r'^明白了', r'^知道了',
+        r'还有什么问题', r'没什么问题', r'没了', r'没有了', r'^没问题',
+        r'^可以$', r'^行$', r'^对$', r'^是$', r'^没错$',
+        r'今天就到这里', r'今天就到这儿', r'感谢.*参与', r'谢谢大家',
+        r'暂时没有', r'有问题.*沟通',
+    ]
+    for p in greetings:
+        if re.search(p, sentence):
+            return False
+    
+    # 过滤问句
+    if sentence.endswith('？') or sentence.endswith('?'):
+        return False
+    
+    question_words = ['怎么', '什么', '谁', '哪', '几', '多少', '为什么', '是否', '吗', '呢']
+    q_count = sum(1 for qw in question_words if qw in sentence)
+    if q_count >= 2 and len(sentence) < 40:
+        return False
+    
+    # 过滤太短且无关键词的句子
+    kw_hits = sum(1 for kw in keywords_set if kw in sentence)
+    if len(sentence) < 20 and kw_hits == 0:
+        return False
+    
+    return True
+
+
+def _get_sentence_signature(sentence):
+    """获取句子签名用于去重"""
+    if not sentence:
+        return ""
+    words = [w for w in jieba.lcut(sentence) if len(w) > 1]
+    return ''.join(sorted(words))[:30]
+
+
+def _clean_final_summary(summary):
+    """最终清理整个摘要"""
+    if not summary:
+        return summary
+    
+    s = summary
+    
+    # 清理重复内容
+    s = re.sub(r'([\u4e00-\u9fa5]{3,})\1+', r'\1', s)
+    
+    # 确保标点正确
+    s = re.sub(r'。。+', '。', s)
+    s = re.sub(r'，，+', '，', s)
+    
+    # 清理"会议会议"等重复词
+    s = re.sub(r'会议会议', '会议', s)
+    s = re.sub(r'参会人员参会人员', '参会人员', s)
+    s = re.sub(r'发言者发言者', '发言者', s)
+    
+    return s.strip()
 
 
 def extract_action_items(text, language='zh'):

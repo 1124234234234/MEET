@@ -112,6 +112,7 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
     score_components['point_coverage'] = coverage_rate * weights['point_coverage']
     
     # 3. 风险内容检测（20分）- 增加时间节点标记和语义层面风险检测
+    # 改进：区分禁止语境和实际使用，避免将合规培训内容误判为风险
     all_risk_keywords = []
     risk_categories = {}
     for item in active_items:
@@ -126,18 +127,21 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
     risk_time_markers = []
     for kw in all_risk_keywords:
         if kw and kw.strip().lower() in transcription_text.lower():
+            if is_negated_context(transcription_text, kw):
+                continue
             risk_keywords_found.append(kw)
             if transcription_segments:
                 time_markers = find_risk_time_markers(kw, transcription_segments)
                 for marker in time_markers:
-                    risk_time_markers.append({
-                        'keyword': kw,
-                        'category': risk_categories.get(kw, '风险内容'),
-                        'start_time': marker['start'],
-                        'end_time': marker['end'],
-                        'text': marker['text'],
-                        'severity': assess_risk_severity(kw)
-                    })
+                    if not is_negated_context(marker['text'], kw):
+                        risk_time_markers.append({
+                            'keyword': kw,
+                            'category': risk_categories.get(kw, '风险内容'),
+                            'start_time': marker['start'],
+                            'end_time': marker['end'],
+                            'text': marker['text'],
+                            'severity': assess_risk_severity(kw)
+                        })
     
     semantic_risks = detect_semantic_risks(transcription_text, transcription_segments)
     risk_time_markers.extend(semantic_risks)
@@ -220,10 +224,47 @@ def assess_risk_severity(keyword):
         return 'low'
 
 
+def is_negated_context(text, keyword, window=15):
+    """
+    检查关键词是否在否定/禁止的语境中
+    如果关键词前面有禁止/不得/不能/不要/严禁/不允许等否定词，则不是风险
+    """
+    import re
+    
+    negation_words = [
+        '禁止', '不得', '不能', '不要', '严禁', '不允许', '不可以', '不准',
+        '反对', '拒绝', '纠正', '不对', '错误', '不应该', '不应当',
+        '必须避免', '不能有', '不允许有', '禁止使用', '禁止承诺',
+        '不允许承诺', '不得承诺', '不得使用', '不可', '千万别',
+        '绝对不能', '一定不要', '坚决禁止', '严格禁止',
+    ]
+    
+    keyword_pos = text.find(keyword)
+    if keyword_pos == -1:
+        return False
+    
+    prefix = text[max(0, keyword_pos - window * 2):keyword_pos]
+    
+    for neg in negation_words:
+        if neg in prefix:
+            return True
+    
+    negation_patterns = [
+        r'.{0,10}(禁止|不得|不能|不要|严禁|不允许|不准|不可以).{0,5}$',
+        r'.{0,10}(反对|拒绝|纠正|不对|错误).{0,5}$',
+    ]
+    for pattern in negation_patterns:
+        if re.search(pattern, prefix):
+            return True
+    
+    return False
+
+
 def detect_semantic_risks(text, segments=None):
     """
     语义层面的风险检测
     检测：偏离主题、表述不当、消极负面等内容
+    改进：区分禁止语境和实际使用，避免将合规培训内容误判为风险
     """
     risks = []
     
@@ -240,22 +281,30 @@ def detect_semantic_risks(text, segments=None):
     
     for pattern, category, severity in inappropriate_patterns:
         import re
-        if re.search(pattern, text):
+        matches = re.finditer(pattern, text)
+        for match in matches:
+            matched_text = match.group()
+            if is_negated_context(text, matched_text):
+                continue
+            
             if segments:
                 for seg in segments:
                     seg_text = seg.get('text', '')
-                    if re.search(pattern, seg_text):
-                        risks.append({
-                            'keyword': pattern,
-                            'category': category,
-                            'start_time': seg.get('start_time', 0),
-                            'end_time': seg.get('end_time', 0),
-                            'text': seg_text,
-                            'severity': severity
-                        })
+                    seg_matches = list(re.finditer(pattern, seg_text))
+                    for seg_match in seg_matches:
+                        seg_matched = seg_match.group()
+                        if not is_negated_context(seg_text, seg_matched):
+                            risks.append({
+                                'keyword': seg_matched,
+                                'category': category,
+                                'start_time': seg.get('start_time', 0),
+                                'end_time': seg.get('end_time', 0),
+                                'text': seg_text,
+                                'severity': severity
+                            })
             else:
                 risks.append({
-                    'keyword': pattern,
+                    'keyword': matched_text,
                     'category': category,
                     'start_time': 0,
                     'end_time': 0,
@@ -273,19 +322,36 @@ def detect_semantic_risks(text, segments=None):
     
     for pattern, category, severity in negative_sentiment_patterns:
         import re
-        if re.search(pattern, text):
+        matches = re.finditer(pattern, text)
+        for match in matches:
+            matched_text = match.group()
+            if is_negated_context(text, matched_text):
+                continue
+            
             if segments:
                 for seg in segments:
                     seg_text = seg.get('text', '')
-                    if re.search(pattern, seg_text):
-                        risks.append({
-                            'keyword': pattern,
-                            'category': category,
-                            'start_time': seg.get('start_time', 0),
-                            'end_time': seg.get('end_time', 0),
-                            'text': seg_text,
-                            'severity': severity
-                        })
+                    seg_matches = list(re.finditer(pattern, seg_text))
+                    for seg_match in seg_matches:
+                        seg_matched = seg_match.group()
+                        if not is_negated_context(seg_text, seg_matched):
+                            risks.append({
+                                'keyword': seg_matched,
+                                'category': category,
+                                'start_time': seg.get('start_time', 0),
+                                'end_time': seg.get('end_time', 0),
+                                'text': seg_text,
+                                'severity': severity
+                            })
+            else:
+                risks.append({
+                    'keyword': matched_text,
+                    'category': category,
+                    'start_time': 0,
+                    'end_time': 0,
+                    'text': text[:50],
+                    'severity': severity
+                })
     
     return risks
 
@@ -413,6 +479,8 @@ def realtime_compliance_check(text_segment, knowledge_base_items, start_time, en
             keywords = json.loads(item.keywords) if item.keywords else []
             for kw in keywords:
                 if kw and kw.strip().lower() in text_lower:
+                    if is_negated_context(text_segment, kw):
+                        continue
                     result['has_risk'] = True
                     result['risk_items'].append({
                         'keyword': kw,
