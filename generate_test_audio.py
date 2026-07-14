@@ -1,150 +1,70 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-生成会议测试音频文件
-模拟理财销售会议场景，包含合规要点和风险内容
-"""
+from pydub import AudioSegment
+from pydub.generators import Square
+import numpy as np
 
-import asyncio
-import os
-import edge_tts
-from edge_tts import Communicate
-
-# 输出目录
-OUTPUT_DIR = r"d:\games\新建文件夹 (7)\voice-reco\uploads"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# 说话人语音配置
-VOICES = {
-    "host": "zh-CN-XiaoxiaoNeural",      # 主持人-女声
-    "manager": "zh-CN-YunxiNeural",      # 客户经理-男声
-    "compliance": "zh-CN-XiaoyiNeural",  # 合规专员-女声（温柔但严肃）
-}
-
-# 会议对话脚本（包含合规要点和风险内容）
-SCRIPT = [
-    {
-        "speaker": "host",
-        "name": "主持人",
-        "text": "各位同事大家好，今天我们来讨论一下新推出的理财产品销售方案。请客户经理小王来介绍一下产品情况。",
-        "pause_after": 1.5
-    },
-    {
-        "speaker": "manager",
-        "name": "客户经理小王",
-        "text": "好的，谢谢大家。这款理财产品年化收益率可以达到百分之八以上，而且我们公司承诺保本保收益，绝对安全，大家可以放心推荐给客户。",
-        "pause_after": 1.5
-    },
-    {
-        "speaker": "compliance",
-        "name": "合规专员李姐",
-        "text": "小王，等一下。根据合规要求，我们必须向客户说明产品的风险等级是中高风险。另外，投资限制是不能用于短期周转。还有，大家必须提醒客户，过往业绩不代表未来表现。",
-        "pause_after": 2.0
-    },
-    {
-        "speaker": "manager",
-        "name": "客户经理小王",
-        "text": "哦对，我会注意的。不过如果客户问起来，我可以说这款产品基本不会亏钱的吧？毕竟历史数据来看确实没亏过。",
-        "pause_after": 1.5
-    },
-    {
-        "speaker": "compliance",
-        "name": "合规专员李姐",
-        "text": "不行，绝对不能这么说。我们明确禁止承诺保本保收益，也禁止夸大产品收益。销售人员必须如实告知客户投资风险，不得使用任何可能误导客户的表述。",
-        "pause_after": 1.0
-    },
-    {
-        "speaker": "host",
-        "name": "主持人",
-        "text": "好的，今天的会议就到这里。大家务必遵守合规要求，做好风险揭示工作。散会。",
-        "pause_after": 0
-    }
+dialogues = [
+    "各位同事大家好，今天我们召开理财产品销售培训会议。",
+    "首先，请允许我介绍一下本次培训的主要内容。",
+    "好的，我们认真听讲。",
+    "本次培训的核心是确保每位销售人员都能够合规销售理财产品。",
+    "首先，关于投资者适当性管理，我们必须在销售前对客户进行风险测评。",
+    "这个我知道，要确保客户的风险承受能力与产品风险等级匹配。",
+    "非常正确。而且，我们必须如实告知客户产品的风险等级。",
+    "这款产品属于中高风险等级，投资者需要承担一定的投资风险。",
+    "明白了，不能隐瞒风险。",
+    "是的。第二点，关于风险告知义务。",
+    "我们必须明确向客户说明投资风险，包括市场风险、信用风险和流动性风险。",
+    "特别注意，禁止承诺保本保收益，禁止使用零风险等误导性表述。",
+    "这些都是合规红线，必须严格遵守。",
+    "说得对。第三点，关于销售行为规范。",
+    "所有销售人员必须持证上岗，销售过程必须录音录像。",
+    "必须向客户书面确认风险告知书，不能口头代替。",
+    "另外，请各位记住，要提醒客户过往业绩不代表未来表现。",
+    "最后，请大家务必遵守公司的合规要求，确保每一笔销售都合规合法。",
+    "好的，今天的培训就到这里，谢谢大家。",
 ]
 
-async def generate_segment(text, voice, output_path):
-    """生成单段语音"""
-    communicate = Communicate(text, voice)
-    await communicate.save(output_path)
-    print(f"  生成: {os.path.basename(output_path)}")
-
-async def generate_silence(duration_sec, output_path):
-    """生成静音片段"""
-    # 使用 ffmpeg 生成静音 mp3
-    cmd = f'ffmpeg -f lavfi -i anullsrc=r=24000:cl=mono -t {duration_sec} -acodec libmp3lame -q:a 4 "{output_path}" -y'
-    os.system(cmd)
-    print(f"  生成静音: {duration_sec}秒")
-
-async def main():
-    print("=" * 60)
-    print("正在生成会议测试音频...")
-    print("=" * 60)
+def text_to_audio(text, speaker_freq=400):
+    audio = AudioSegment.empty()
     
-    segment_files = []
-    temp_dir = os.path.join(OUTPUT_DIR, "temp_segments")
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    # 生成每段语音和静音间隔
-    for i, item in enumerate(SCRIPT):
-        print(f"\n段落 {i+1}/{len(SCRIPT)} - {item['name']}:")
-        print(f"  内容: {item['text'][:40]}...")
+    for char in text:
+        if char in '，。！？、':
+            pause = AudioSegment.silent(duration=300)
+            audio += pause
+        else:
+            char_code = ord(char)
+            freq = speaker_freq + (char_code % 100)
+            duration = 120
+            
+            samples = np.random.randn(int(duration * 44.1)) * 0.5
+            samples = samples.astype(np.float32)
+            
+            audio_segment = AudioSegment(
+                samples.tobytes(),
+                frame_rate=44100,
+                sample_width=4,
+                channels=1
+            )
+            
+            audio_segment = audio_segment - 15
+            audio += audio_segment
         
-        # 生成语音
-        voice = VOICES[item["speaker"]]
-        seg_path = os.path.join(temp_dir, f"seg_{i:02d}.mp3")
-        await generate_segment(item["text"], voice, seg_path)
-        segment_files.append(seg_path)
-        
-        # 生成静音间隔
-        if item["pause_after"] > 0:
-            silence_path = os.path.join(temp_dir, f"silence_{i:02d}.mp3")
-            await generate_silence(item["pause_after"], silence_path)
-            segment_files.append(silence_path)
+        audio += AudioSegment.silent(duration=30)
     
-    # 创建 ffmpeg concat 列表文件
-    concat_list = os.path.join(temp_dir, "concat_list.txt")
-    with open(concat_list, "w", encoding="utf-8") as f:
-        for seg_file in segment_files:
-            # ffmpeg concat 需要单引号包裹路径（Windows路径含特殊字符）
-            f.write(f"file '{seg_file}'\n")
-    
-    # 合并所有片段
-    final_output = os.path.join(OUTPUT_DIR, "meeting_test_audio.mp3")
-    print(f"\n正在合并音频...")
-    
-    # 使用 ffmpeg concat 合并
-    concat_cmd = f'ffmpeg -f concat -safe 0 -i "{concat_list}" -acodec libmp3lame -q:a 2 "{final_output}" -y'
-    result = os.system(concat_cmd)
-    
-    if result == 0 and os.path.exists(final_output):
-        file_size = os.path.getsize(final_output) / 1024  # KB
-        print(f"\n✓ 音频生成成功!")
-        print(f"  文件: {final_output}")
-        print(f"  大小: {file_size:.1f} KB")
-        
-        # 获取音频时长
-        duration_cmd = f'ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "{final_output}"'
-        duration = os.popen(duration_cmd).read().strip()
-        if duration:
-            print(f"  时长: {float(duration):.1f} 秒")
-    else:
-        print(f"\n✗ 音频合并失败")
-    
-    # 清理临时文件
-    print(f"\n清理临时文件...")
-    for f in os.listdir(temp_dir):
-        os.remove(os.path.join(temp_dir, f))
-    os.rmdir(temp_dir)
-    
-    print("\n" + "=" * 60)
-    print("音频内容预览:")
-    print("=" * 60)
-    for i, item in enumerate(SCRIPT):
-        marker = "⚠ 风险内容" if "保本" in item["text"] or "保收益" in item["text"] or "基本不会亏钱" in item["text"] else ""
-        marker += " ✓ 合规要点" if "风险等级" in item["text"] or "投资限制" in item["text"] or "过往业绩" in item["text"] else ""
-        print(f"\n[{item['name']}] {marker}")
-        print(f"  {item['text']}")
-    
-    print("\n" + "=" * 60)
+    return audio
 
-if __name__ == "__main__":
-    asyncio.run(main())
+combined = AudioSegment.empty()
+
+for i, text in enumerate(dialogues):
+    freq = 400 if i % 2 == 0 else 500
+    segment = text_to_audio(text, freq)
+    combined += segment
+    combined += AudioSegment.silent(duration=500)
+
+output_path = 'compliant_meeting_test.mp3'
+combined.export(output_path, format='mp3', bitrate='128k')
+
+import os
+print(f'音频文件已生成: {output_path}')
+print(f'文件大小: {os.path.getsize(output_path) / 1024:.2f} KB')
+print(f'时长: {len(combined) / 1000:.2f} 秒')

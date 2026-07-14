@@ -385,10 +385,18 @@ def get_knowledge_item(item_id):
 
 @app.route('/api/knowledge-base', methods=['POST'])
 def create_knowledge_item():
-    if 'file' in request.files:
+    content_type = request.headers.get('Content-Type', '')
+    
+    if 'multipart/form-data' in content_type and 'file' in request.files:
         return upload_knowledge_file()
     
-    data = request.get_json()
+    try:
+        data = request.get_json()
+    except:
+        data = None
+    
+    if data is None:
+        return jsonify({'code': 400, 'message': '请求格式错误'}), 400
     
     item = KnowledgeBase(
         title=data.get('title'),
@@ -616,6 +624,49 @@ def get_meeting_participants(meeting_id):
             'distribution': distribution
         }
     })
+
+@app.route('/api/meetings/test-analyze', methods=['POST'])
+def test_analyze():
+    data = request.get_json()
+    text = data.get('text', '')
+    
+    from modules.compliance_checker import check_compliance, calculate_compliance_score
+    
+    result = check_compliance(text)
+    weights = get_default_weights()
+    score_result = calculate_compliance_score(result, weights)
+    
+    return jsonify({
+        'code': 200,
+        'compliance_score': score_result.get('total_score'),
+        'score_level': score_result.get('score_level'),
+        'missing_points': result.get('missing_points'),
+        'risk_keywords': result.get('risk_keywords'),
+        'suggestions': result.get('suggestions'),
+        'matched_keywords': result.get('matched_keywords')
+    })
+
+
+@app.route('/api/meetings/test-summary', methods=['POST'])
+def test_summary():
+    data = request.get_json()
+    text = data.get('text', '')
+    
+    from modules.text_analyzer import generate_summary, extract_keywords, analyze_topic, analyze_sentiment
+    
+    summary = generate_summary(text)
+    keywords = extract_keywords(text)
+    topics = analyze_topic(text)
+    sentiment = analyze_sentiment(text)
+    
+    return jsonify({
+        'code': 200,
+        'summary': summary,
+        'keywords': keywords,
+        'topics': topics,
+        'sentiment': sentiment
+    })
+
 
 @app.route('/api/reports/meeting-summary/<int:meeting_id>')
 def get_meeting_summary_report(meeting_id):

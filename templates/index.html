@@ -1234,7 +1234,7 @@
                         <td>${m.compliance_report?.risk_keywords?.length || 0}</td>
                         <td>${m.compliance_report?.suggestions?.[0] || '--'}</td>
                         <td>${new Date(m.created_at).toLocaleString()}</td>
-                        <td><button class="btn btn-secondary btn-sm" onclick="viewMeetingDetail(${m.id})">查看详情</button></td>
+                        <td><button class="btn btn-primary btn-sm" onclick="viewMeeting(${m.id})">查看详情</button></td>
                     </tr>
                 `;
             }).join('');
