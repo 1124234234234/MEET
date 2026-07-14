@@ -18,7 +18,7 @@ def _get_compliance_model():
 
 def calculate_compliance_score(transcription_text, knowledge_base_items, score_weights=None, transcription_segments=None):
     """
-    计算合规评分
+    计算合规评分 - 智能匹配相关知识库，避免被不相关内容拉低分数
     
     参数:
         transcription_text: 转写文本
@@ -49,67 +49,91 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
             'covered_points': [],
             'missing_points': [],
             'risk_keywords_found': [],
-            'risk_time_markers': [],  # 新增：风险内容时间节点
+            'risk_time_markers': [],
             'matched_keywords': [],
             'suggestions': ['知识库为空，请先添加合规检查规则']
         }
     
-    # 1. 语义相似度匹配（40分）
-    total_similarity = 0
-    for item in active_items:
-        similarity = compute_semantic_similarity(transcription_text, item.content)
-        total_similarity += similarity
+    # 1. 计算每个知识库条目与文本的相关性，找出最相关的
+    policy_items = [item for item in active_items if item.item_type in ['policy', 'meeting_spirit']]
+    point_items = [item for item in active_items if item.item_type in ['required', 'key_points']]
+    risk_items = [item for item in active_items if item.item_type in ['risk_keywords', 'forbidden']]
     
-    score_components['semantic_similarity'] = (total_similarity / len(active_items)) * weights['semantic_similarity']
+    # 计算政策类条目的相似度，找出最相关的
+    policy_similarities = []
+    for item in policy_items:
+        sim = compute_semantic_similarity(transcription_text, item.content)
+        policy_similarities.append((item, sim))
     
-    # 2. 必传要点覆盖率（30分）- 使用关键词匹配
-    all_required_points = []
-    point_keywords_map = {}  # 关键词到要点的映射
-    point_sources = {}  # 记录每个要点来自哪个政策
+    # 按相似度排序，取最相关的
+    policy_similarities.sort(key=lambda x: x[1], reverse=True)
+    best_policy_sim = policy_similarities[0][1] if policy_similarities else 0.0
     
-    for item in active_items:
-        # 支持 required 和 key_points 两种类型
-        if item.item_type in ['required', 'key_points']:
-            points = json.loads(item.required_points) if item.required_points else []
-            keywords = json.loads(item.keywords) if item.keywords else []
-            
-            for point in points:
-                if point:
-                    all_required_points.append(point)
-                    point_sources[point] = item.title
-            
-            # 将关键词映射到要点
-            for kw in keywords:
-                if kw:
-                    point_keywords_map[kw] = {'points': points, 'title': item.title}
+    # 1. 语义相似度得分（40分）- 取最相关政策的相似度，而不是平均
+    score_components['semantic_similarity'] = best_policy_sim * weights['semantic_similarity']
+    
+    # 2. 必传要点覆盖率（30分）- 只考虑与内容相关的要点模板
+    #    策略：找出关键词匹配最多的key_points条目，用它来计算覆盖率
+    best_point_item = None
+    best_point_match_count = 0
+    
+    for item in point_items:
+        keywords = json.loads(item.keywords) if item.keywords else []
+        match_count = sum(1 for kw in keywords if kw and kw.lower() in transcription_text.lower())
+        if match_count > best_point_match_count:
+            best_point_match_count = match_count
+            best_point_item = item
+    
+    # 另外：也根据政策相似度来找对应的要点（如果政策和要点标题相似）
+    if policy_similarities and policy_similarities[0][1] > 0.1:
+        best_policy_title = policy_similarities[0][0].title
+        # 找标题最匹配的要点条目
+        for item in point_items:
+            title_sim = simple_similarity(best_policy_title, item.title)
+            if title_sim > 0.3:
+                best_point_item = item
+                break
     
     covered_points = []
-    point_time_markers = []  # 要点出现的时间节点
+    point_time_markers = []
+    all_required_points = []
     
-    # 用关键词来检查要点覆盖（更灵活的匹配）
-    for kw, mapping in point_keywords_map.items():
-        kw_lower = kw.strip().lower()
-        if kw_lower in transcription_text.lower():
-            # 关键词匹配成功，记录对应的要点
-            for point in mapping['points']:
-                if point and point not in covered_points:
-                    covered_points.append(point)
-            
-            # 尝试找到关键词出现的时间节点
-            if transcription_segments:
-                time_marker = find_point_time_marker(kw, transcription_segments)
-                if time_marker:
-                    point_time_markers.append({
-                        'point': mapping['points'][0] if mapping['points'] else kw,  # 显示完整要点描述
-                        'keyword': kw,  # 实际匹配的关键词
-                        'source': mapping['title'],
-                        'start_time': time_marker['start'],
-                        'end_time': time_marker['end'],
-                        'text': time_marker['text']
-                    })
+    if best_point_item:
+        points = json.loads(best_point_item.required_points) if best_point_item.required_points else []
+        keywords = json.loads(best_point_item.keywords) if best_point_item.keywords else []
+        all_required_points = [p for p in points if p]
+        
+        point_keywords_map = {}
+        for kw in keywords:
+            if kw:
+                point_keywords_map[kw] = points
+        
+        for kw, kw_points in point_keywords_map.items():
+            kw_lower = kw.strip().lower()
+            if kw_lower in transcription_text.lower():
+                for point in kw_points:
+                    if point and point not in covered_points:
+                        covered_points.append(point)
+                
+                if transcription_segments:
+                    time_marker = find_point_time_marker(kw, transcription_segments)
+                    if time_marker:
+                        point_time_markers.append({
+                            'point': kw_points[0] if kw_points else kw,
+                            'keyword': kw,
+                            'source': best_point_item.title,
+                            'start_time': time_marker['start'],
+                            'end_time': time_marker['end'],
+                            'text': time_marker['text']
+                        })
     
-    coverage_rate = len(covered_points) / max(len(all_required_points), 1)
-    score_components['point_coverage'] = coverage_rate * weights['point_coverage']
+    if all_required_points:
+        coverage_rate = len(covered_points) / len(all_required_points)
+        score_components['point_coverage'] = coverage_rate * weights['point_coverage']
+    else:
+        # 没有配置必传要点时，给一个基础分（按关键词匹配度）
+        if policy_similarities and best_policy_sim > 0:
+            score_components['point_coverage'] = best_policy_sim * weights['point_coverage'] * 0.8
     
     # 3. 风险内容检测（20分）- 增加时间节点标记和语义层面风险检测
     # 改进：区分禁止语境和实际使用，避免将合规培训内容误判为风险
@@ -149,18 +173,25 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
     risk_score = max(0, weights['risk_detection'] - len(risk_keywords_found) * 5 - len(semantic_risks) * 3)
     score_components['risk_detection'] = risk_score
     
-    # 4. 关键词命中（10分）
-    all_keywords = []
-    for item in active_items:
-        keywords = json.loads(item.keywords) if item.keywords else []
-        all_keywords.extend(keywords)
+    # 4. 关键词命中（10分）- 只统计最相关政策的关键词
+    relevant_keywords = []
+    if policy_similarities and best_policy_sim > 0.1:
+        best_policy = policy_similarities[0][0]
+        keywords = json.loads(best_policy.keywords) if best_policy.keywords else []
+        relevant_keywords = [kw for kw in keywords if kw]
+    
+    if not relevant_keywords:
+        # 如果没有相关政策，取所有关键词
+        for item in active_items:
+            keywords = json.loads(item.keywords) if item.keywords else []
+            relevant_keywords.extend(keywords)
     
     matched_keywords = []
-    for kw in all_keywords:
+    for kw in relevant_keywords:
         if kw and kw.strip().lower() in transcription_text.lower():
             matched_keywords.append(kw)
     
-    keyword_rate = len(matched_keywords) / max(len(all_keywords), 1)
+    keyword_rate = len(matched_keywords) / max(len(relevant_keywords), 1)
     score_components['keyword_matching'] = keyword_rate * weights['keyword_matching']
     
     # 总分
@@ -377,9 +408,11 @@ def compute_semantic_similarity(text1, text2):
 
 
 def simple_similarity(text1, text2):
-    """简单相似度（降级方案）"""
-    words1 = set(text1.lower().split())
-    words2 = set(text2.lower().split())
+    """简单相似度（降级方案）- 使用jieba分词支持中文"""
+    import jieba
+    
+    words1 = set(w for w in jieba.lcut(text1.lower()) if len(w) > 1)
+    words2 = set(w for w in jieba.lcut(text2.lower()) if len(w) > 1)
     
     if not words1 or not words2:
         return 0.0

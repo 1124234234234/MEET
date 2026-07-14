@@ -818,6 +818,38 @@ with app.app_context():
         db.session.add(risk_keywords)
         db.session.add(key_points)
         db.session.commit()
+    
+    # 补充金融合规知识库模板（如果不存在）
+    if not KnowledgeBase.query.filter_by(title='理财产品销售合规管理办法').first():
+        # 金融合规模板
+        fin_policy = KnowledgeBase(
+            title='理财产品销售合规管理办法',
+            content='理财产品销售必须遵守合规要求，包括投资者适当性管理、风险测评、风险告知、禁止误导性宣传等。销售人员必须持证上岗，销售过程需录音录像。',
+            item_type='policy',
+            keywords=json.dumps(['风险', '销售', '投资者', '必须', '理财', '产品', '合规', '客户', '告知', '测评', '适当性']),
+            required_points=json.dumps([])
+        )
+        
+        fin_risk = KnowledgeBase(
+            title='金融销售风险关键词',
+            content='金融销售中禁止使用的风险词汇。',
+            item_type='risk_keywords',
+            keywords=json.dumps(['保本保收益', '零风险', '稳赚不赔', '绝对安全', '保证收益', '高收益无风险', '只赚不赔', '无风险']),
+            required_points=json.dumps([])
+        )
+        
+        fin_points = KnowledgeBase(
+            title='理财销售必传要点',
+            content='理财产品销售必须覆盖的合规要点。',
+            item_type='key_points',
+            keywords=json.dumps(['风险测评', '适当性', '风险告知', '录音录像', '持证上岗', '风险等级', '承受能力', '书面确认', '风险揭示', '合规销售']),
+            required_points=json.dumps(['投资者风险测评', '风险等级匹配', '风险告知义务', '销售过程录音录像', '销售人员持证上岗', '书面确认风险揭示书'])
+        )
+        
+        db.session.add(fin_policy)
+        db.session.add(fin_risk)
+        db.session.add(fin_points)
+        db.session.commit()
 
 if __name__ == '__main__':
     init_whisper_model()          # 加载 medium 用于上传分析

@@ -106,15 +106,15 @@ def enhanced_diarization(audio_path, num_speakers=None):
     
     print(f"  [diarization] features extracted: MFCC={mfcc.shape}, {time.time()-t0:.1f}s")
 
-    # 2. 组合所有特征
+    # 2. 组合所有特征 - 加重MFCC和频谱特征权重（更突出音色差异）
     features = np.vstack([
         mfcc,
-        mfcc_delta * 0.5,
-        mfcc_delta2 * 0.3,
-        chroma * 0.3,
-        spectral_centroid * 0.1,
-        spectral_bandwidth * 0.1,
-        zcr * 0.2,
+        mfcc_delta * 0.8,
+        mfcc_delta2 * 0.5,
+        chroma * 0.2,
+        spectral_centroid * 0.3,
+        spectral_bandwidth * 0.3,
+        zcr * 0.1,
         rms * 0.1,
     ]).T
     
@@ -144,33 +144,43 @@ def enhanced_diarization(audio_path, num_speakers=None):
         estimated_n = num_speakers
         print(f"  [diarization] using specified speakers: {estimated_n}")
 
-    # 6. 使用GMM + 层次聚类的组合方案
+    # 6. 使用谱聚类 + GMM的组合方案（谱聚类更适合说话人音色聚类）
     try:
-        # 先用GMM初始化
-        gmm = GaussianMixture(
-            n_components=estimated_n,
+        # 先用谱聚类（对非球形簇效果更好）
+        from sklearn.cluster import SpectralClustering
+        clustering = SpectralClustering(
+            n_clusters=estimated_n,
             random_state=42,
-            n_init=3,
-            max_iter=100
-        )
-        gmm_labels = gmm.fit_predict(voice_features)
-        
-        # 再用层次聚类精炼
-        clustering = AgglomerativeClustering(
-            n_clusters=estimated_n,
-            linkage='ward',
-            metric='euclidean'
+            affinity='nearest_neighbors',
+            n_neighbors=min(30, len(voice_features) // 10),
+            assign_labels='kmeans'
         )
         labels_voice = clustering.fit_predict(voice_features)
         
-        print(f"  [diarization] clustering done: {time.time()-t0:.1f}s")
+        print(f"  [diarization] spectral clustering done: {time.time()-t0:.1f}s")
     except Exception as e:
-        print(f"  [diarization] advanced clustering failed: {e}, using basic")
-        clustering = AgglomerativeClustering(
-            n_clusters=estimated_n,
-            linkage='ward'
-        )
-        labels_voice = clustering.fit_predict(voice_features)
+        print(f"  [diarization] spectral clustering failed: {e}, using agglomerative")
+        try:
+            # 备用：GMM初始化 + 层次聚类
+            gmm = GaussianMixture(
+                n_components=estimated_n,
+                random_state=42,
+                n_init=3,
+                max_iter=100
+            )
+            gmm_labels = gmm.fit_predict(voice_features)
+            
+            clustering = AgglomerativeClustering(
+                n_clusters=estimated_n,
+                linkage='ward',
+                metric='euclidean'
+            )
+            labels_voice = clustering.fit_predict(voice_features)
+        except Exception as e2:
+            print(f"  [diarization] all clustering failed: {e2}, using basic KMeans")
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=estimated_n, random_state=42, n_init=5)
+            labels_voice = kmeans.fit_predict(voice_features)
 
     # 7. 将标签映射回所有帧
     n_frames = len(features_scaled)
@@ -217,7 +227,8 @@ def enhanced_diarization(audio_path, num_speakers=None):
 def estimate_num_speakers_advanced(features, max_speakers=5):
     """
     估计说话人数量
-    使用轮廓系数 + BIC准则综合判断
+    使用轮廓系数 + 肘部法则综合判断
+    对中文会议场景做优化：至少2人，优先尝试2-4人
     """
     from sklearn.mixture import GaussianMixture
     from sklearn.metrics import silhouette_score
@@ -235,36 +246,67 @@ def estimate_num_speakers_advanced(features, max_speakers=5):
     else:
         features_sample = features
     
-    best_n = 2
-    best_score = -1
-    
-    # 只尝试2-5个说话人
+    # 策略1：轮廓系数
+    sil_scores = {}
     for n in range(2, min(max_speakers, 5) + 1):
         try:
-            # 用KMeans快速聚类计算轮廓系数
             kmeans = KMeans(n_clusters=n, random_state=42, n_init=5, max_iter=100)
             labels = kmeans.fit_predict(features_sample)
             
-            # 轮廓系数越大越好
             if len(set(labels)) > 1:
                 sil_score = silhouette_score(features_sample, labels, sample_size=min(500, len(features_sample)))
             else:
                 sil_score = -1
             
-            # 惩罚过多的说话人（轻微惩罚，避免过度分类）
-            penalty = (n - 2) * 0.05
-            adjusted_score = sil_score - penalty
-            
-            print(f"    [estimate] n={n}, silhouette={sil_score:.4f}, adjusted={adjusted_score:.4f}")
-            
-            if adjusted_score > best_score:
-                best_score = adjusted_score
-                best_n = n
+            sil_scores[n] = sil_score
+            print(f"    [estimate] n={n}, silhouette={sil_score:.4f}")
         except Exception as e:
             print(f"    [estimate] n={n} failed: {e}")
-            continue
+            sil_scores[n] = -1
     
-    print(f"    [estimate] best_n={best_n}, score={best_score:.4f}")
+    # 策略2：GMM BIC（贝叶斯信息准则，越小越好）
+    bic_scores = {}
+    for n in range(2, min(max_speakers, 5) + 1):
+        try:
+            gmm = GaussianMixture(n_components=n, random_state=42, n_init=3, max_iter=100)
+            gmm.fit(features_sample)
+            bic_scores[n] = gmm.bic(features_sample)
+            print(f"    [estimate] n={n}, BIC={bic_scores[n]:.1f}")
+        except Exception as e:
+            bic_scores[n] = float('inf')
+    
+    # 综合判断：
+    # 1. 如果轮廓系数n=3和n=2差距不大（<0.02），偏向n=3（会议场景更常见）
+    # 2. 如果BIC显示n=3明显更小，选n=3
+    best_n = 2
+    
+    sil_n2 = sil_scores.get(2, -1)
+    sil_n3 = sil_scores.get(3, -1)
+    sil_n4 = sil_scores.get(4, -1)
+    
+    bic_n2 = bic_scores.get(2, float('inf'))
+    bic_n3 = bic_scores.get(3, float('inf'))
+    bic_n4 = bic_scores.get(4, float('inf'))
+    
+    # 找BIC最小的（注意BIC越小越好）
+    min_bic_n = min(bic_scores, key=bic_scores.get) if bic_scores else 2
+    
+    # 决策逻辑：
+    # - 会议场景通常2-4人
+    # - 轮廓系数差距在0.02以内时，选择BIC更优的
+    # - 如果都差不多，偏向3人（更符合会议场景）
+    if sil_n3 >= sil_n2 - 0.02 and bic_n3 < bic_n2:
+        best_n = 3
+    elif sil_n2 > sil_n3 and sil_n2 - sil_n3 > 0.03:
+        best_n = 2
+    elif sil_n3 >= 0:
+        best_n = 3
+    
+    # 如果n=4的BIC明显更好，且轮廓系数不低
+    if best_n == 3 and sil_n4 >= sil_n3 - 0.02 and bic_n4 < bic_n3 * 0.98:
+        best_n = 4
+    
+    print(f"    [estimate] best_n={best_n} (sil={sil_scores.get(best_n, 0):.4f}, BIC={bic_scores.get(best_n, 0):.1f})")
     return best_n
 
 
