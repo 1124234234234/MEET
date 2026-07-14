@@ -962,21 +962,9 @@ def generate_summary(text, max_length=500, language='zh', use_model=True):
     topics = analyze_topic(text, language=language)
 
     if model_summary:
-        # 大模型生成摘要成功：直接使用大模型结果作为主体
-        summary_parts = []
-
-        if topics and topics[0]['score'] > 0:
-            top_topics = [t['topic'] for t in topics[:2] if t['score'] > 0.2]
-            if top_topics:
-                topic_desc = '与'.join(top_topics)
-                opening = f"本次会议围绕{topic_desc}展开讨论。"
-                summary_parts.append(opening)
-
-        # 大模型摘要（已包含第三人称、正式书面语）
+        # 大模型生成摘要成功：直接使用大模型结果，不再加额外开头
         model_summary_clean = _clean_summary_text(model_summary)
-        summary_parts.append(model_summary_clean)
-
-        summary = ''.join(summary_parts)
+        summary = model_summary_clean
     else:
         # TextRank方案：需要第三人称转换和去重
         summary_parts = []
