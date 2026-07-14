@@ -404,6 +404,12 @@ def detect_semantic_risks(text, segments=None):
 def compute_semantic_similarity(text1, text2):
     """计算语义相似度"""
     try:
+        text1 = (text1 or '').strip()
+        text2 = (text2 or '').strip()
+        
+        if not text1 or not text2:
+            return 0.0
+        
         from sentence_transformers import util
         
         model = _get_compliance_model()
