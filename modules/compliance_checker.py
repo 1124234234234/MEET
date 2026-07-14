@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime
 
 _compliance_model = None
@@ -8,8 +9,21 @@ def _get_compliance_model():
     if _compliance_model is None:
         try:
             from sentence_transformers import SentenceTransformer
-            _compliance_model = SentenceTransformer('all-MiniLM-L6-v2')
-            print('Loaded compliance semantic similarity model')
+            
+            # 优先使用本地中文向量模型 bge-small-zh-v1.5
+            local_model_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'models', 'bge-small-zh-v1.5'
+            )
+            
+            if os.path.exists(local_model_path):
+                _compliance_model = SentenceTransformer(local_model_path)
+                print(f'Loaded bge-small-zh-v1.5 from local: {local_model_path}')
+            else:
+                # 降级：尝试从HuggingFace下载
+                os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
+                _compliance_model = SentenceTransformer('BAAI/bge-small-zh-v1.5')
+                print('Loaded bge-small-zh-v1.5 from HuggingFace')
         except Exception as e:
             print(f"Failed to load compliance model: {e}")
             return None
