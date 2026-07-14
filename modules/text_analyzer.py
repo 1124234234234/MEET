@@ -113,52 +113,60 @@ def _mt5_summarize(text, max_length=200):
 
 def _mt5_polish_sentences(sentences, source_text):
     """
-    使用mT5大模型逐句精炼：将口语化句子转为正式书面语
-    比全文摘要更稳定，幻觉风险更低
+    使用mT5大模型精炼摘要句子：将口语化句子转为正式书面语
+    策略：拼接所有句子一次性生成精炼摘要，比逐句更快更连贯
     """
     model, tokenizer = get_mt5_model()
     if model is None or not sentences:
         return sentences
 
-    polished = []
     import torch
 
-    for sent in sentences:
-        if len(sent) < 15:
-            polished.append(sent)
-            continue
+    # 将句子拼接后一次性生成精炼摘要
+    combined = '。'.join(sentences)
+    if len(combined) < 30:
+        return sentences
 
-        try:
-            # 让模型精炼单句，限制输出长度避免幻觉
-            inputs = tokenizer(sent, return_tensors='pt', max_length=256, truncation=True)
-            with torch.no_grad():
-                outputs = model.generate(
-                    inputs['input_ids'],
-                    max_length=len(sent) + 20,  # 不超过原句太多
-                    min_length=max(10, len(sent) // 2),
-                    num_beams=3,
-                    early_stopping=True,
-                    no_repeat_ngram_size=2,
-                    length_penalty=0.8,
-                )
-            result = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+    try:
+        inputs = tokenizer(combined, return_tensors='pt', max_length=512, truncation=True)
+        with torch.no_grad():
+            outputs = model.generate(
+                inputs['input_ids'],
+                max_length=200,
+                min_length=30,
+                num_beams=4,
+                early_stopping=True,
+                no_repeat_ngram_size=3,
+                length_penalty=1.0,
+            )
+        result = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
 
-            # 验证：精炼结果不能有幻觉
-            if result and len(result) > 10 and not _is_hallucinated(result, source_text):
-                # 精炼结果应保留原句的核心实体
-                orig_words = set(w for w in jieba.lcut(sent) if len(w) > 1)
-                result_words = set(w for w in jieba.lcut(result) if len(w) > 1)
-                overlap = len(orig_words & result_words) / max(len(orig_words), 1)
-                if overlap > 0.3:  # 至少30%的词重叠
-                    polished.append(result)
-                    continue
+        if not result or len(result) < 20:
+            return sentences
 
-            # 精炼失败，保留原句
-            polished.append(sent)
-        except Exception:
-            polished.append(sent)
+        # 检测幻觉
+        if _is_hallucinated(result, source_text):
+            print('[摘要模型] 批量精炼结果疑似幻觉，保留原文')
+            return sentences
 
-    return polished
+        # 将精炼结果按句号分句
+        refined_sents = [s.strip() for s in re.split(r'[。！？]', result) if s.strip() and len(s.strip()) > 10]
+
+        # 验证：精炼结果的实体覆盖度
+        if refined_sents:
+            orig_entities = set(w for w in jieba.lcut(combined) if len(w) >= 2 and w not in STOPWORDS_ZH)
+            refined_entities = set(w for w in jieba.lcut(result) if len(w) >= 2 and w not in STOPWORDS_ZH)
+            overlap = len(orig_entities & refined_entities) / max(len(orig_entities), 1)
+            if overlap < 0.15:
+                print(f'[摘要模型] 实体覆盖度过低({overlap:.0%})，保留原文')
+                return sentences
+            print(f'[摘要模型] 批量精炼成功({len(refined_sents)}句, 实体覆盖{overlap:.0%})')
+            return refined_sents
+
+        return sentences
+    except Exception as e:
+        print(f'[摘要模型] 批量精炼失败: {e}')
+        return sentences
 
 # 缓存sentence_transformers模型，避免每次分析都重新加载
 _sentence_transformer_models = {}
@@ -862,62 +870,81 @@ def generate_summary(text, max_length=500, language='zh', use_model=True):
         processed_sents = fallback_sents
 
     # ====== 第二步：尝试mT5大模型精炼句子 ======
+    model_refined = False
     if use_model:
         polished = _mt5_polish_sentences(processed_sents[:6], text)
-        # 如果精炼后句子数量没减少（没出错），使用精炼结果
-        if polished and len(polished) >= len(processed_sents[:6]) - 1:
+        # 精炼成功且句子数量合理
+        if polished and len(polished) >= 2 and polished != processed_sents[:6]:
             processed_sents = polished
-            print(f'[摘要模型] mT5逐句精炼完成，{len(polished)}句')
+            model_refined = True
 
     # ====== 第三步：组装最终摘要 ======
     topics = analyze_topic(text, language=language)
-    summary_parts = []
 
-    # 开头：会议主题引入
-    if topics and topics[0]['score'] > 0:
-        top_topics = [t['topic'] for t in topics[:2] if t['score'] > 0.2]
-        if top_topics:
-            topic_desc = '与'.join(top_topics)
-            kw_list = [kw['word'] for kw in keywords[:8] if kw['word'] not in top_topics and len(kw['word']) > 1]
-            if kw_list:
-                kw_desc = '、'.join(kw_list[:5])
-                opening = f"本次会议围绕{topic_desc}展开讨论，涉及{kw_desc}等核心内容。"
-            else:
+    if model_refined:
+        # 大模型精炼成功：精炼结果已经是正式书面语，直接组装
+        summary_parts = []
+
+        # 开头：会议主题引入
+        if topics and topics[0]['score'] > 0:
+            top_topics = [t['topic'] for t in topics[:2] if t['score'] > 0.2]
+            if top_topics:
+                topic_desc = '与'.join(top_topics)
                 opening = f"本次会议围绕{topic_desc}展开讨论。"
-            summary_parts.append(opening)
+                summary_parts.append(opening)
 
-    # 核心讨论内容
-    core_sents = []
-    for sent in processed_sents:
-        if summary_parts and _sentence_similarity(sent, summary_parts[0]) > 0.4:
-            continue
-        if len(sent) < 15:
-            continue
-        core_sents.append(sent)
-        if len(core_sents) >= 4:
-            break
+        # 精炼后的句子直接使用
+        for sent in processed_sents:
+            if len(sent) >= 10:
+                summary_parts.append(sent)
 
-    summary_parts.extend(core_sents)
+        summary = '。'.join(summary_parts)
+    else:
+        # TextRank方案：需要第三人称转换和去重
+        summary_parts = []
 
-    # 行动项或结论
-    action_items = extract_action_items(text, language=language)
-    if action_items:
-        unique_actions = []
-        for ai in action_items[:3]:
-            ai_narrative = _convert_to_narrative(ai)
-            ai_clean = _clean_summary_text(ai_narrative)
-            is_dup = False
-            for existing in summary_parts:
-                if _sentence_similarity(ai_clean, existing) > 0.5:
-                    is_dup = True
-                    break
-            if not is_dup and len(ai_clean) > 10:
-                unique_actions.append(ai_clean)
-        if unique_actions:
-            action_desc = '；'.join(unique_actions[:2])
-            summary_parts.append(f"会议明确{action_desc}")
+        if topics and topics[0]['score'] > 0:
+            top_topics = [t['topic'] for t in topics[:2] if t['score'] > 0.2]
+            if top_topics:
+                topic_desc = '与'.join(top_topics)
+                kw_list = [kw['word'] for kw in keywords[:8] if kw['word'] not in top_topics and len(kw['word']) > 1]
+                if kw_list:
+                    kw_desc = '、'.join(kw_list[:5])
+                    opening = f"本次会议围绕{topic_desc}展开讨论，涉及{kw_desc}等核心内容。"
+                else:
+                    opening = f"本次会议围绕{topic_desc}展开讨论。"
+                summary_parts.append(opening)
 
-    summary = '。'.join(summary_parts)
+        core_sents = []
+        for sent in processed_sents:
+            if summary_parts and _sentence_similarity(sent, summary_parts[0]) > 0.4:
+                continue
+            if len(sent) < 15:
+                continue
+            core_sents.append(sent)
+            if len(core_sents) >= 4:
+                break
+
+        summary_parts.extend(core_sents)
+
+        action_items = extract_action_items(text, language=language)
+        if action_items:
+            unique_actions = []
+            for ai in action_items[:3]:
+                ai_narrative = _convert_to_narrative(ai)
+                ai_clean = _clean_summary_text(ai_narrative)
+                is_dup = False
+                for existing in summary_parts:
+                    if _sentence_similarity(ai_clean, existing) > 0.5:
+                        is_dup = True
+                        break
+                if not is_dup and len(ai_clean) > 10:
+                    unique_actions.append(ai_clean)
+            if unique_actions:
+                action_desc = '；'.join(unique_actions[:2])
+                summary_parts.append(f"会议明确{action_desc}")
+
+        summary = '。'.join(summary_parts)
 
     summary = _clean_final_summary(summary)
 
