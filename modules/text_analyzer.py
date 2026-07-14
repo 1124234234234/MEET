@@ -970,101 +970,132 @@ def keyword_based_topic(text, topics, topic_keywords=None):
 def analyze_sentiment(text, language='zh'):
     """
     分析会议情绪倾向（辅助风险识别）
-    改进：扩充情感词典 + 否定词处理 + 程度副词加权
+    使用snownlp开源库进行中文情感分析
     """
     if language == 'zh':
-        # 扩充的情感词典
-        positive_words = {
-            '好': 1, '优秀': 2, '完成': 1, '成功': 2, '进步': 1, '提升': 1, '积极': 1,
-            '满意': 2, '支持': 1, '同意': 1, '通过': 1, '批准': 1, '赞': 1, '赞成': 1,
-            '顺利': 1, '突破': 2, '创新': 1, '高效': 1, '优化': 1, '改善': 1,
-            '增长': 1, '盈利': 1, '超越': 1, '达成': 1, '实现': 1, '解决': 1,
-            '加强': 1, '推进': 1, '落实': 1, '成效': 1, '成果': 1, '收获': 1,
-        }
-        
-        negative_words = {
-            '消极': 1, '反对': 1, '抵制': 2, '抱怨': 1, '不满': 1, '拒绝': 1,
-            '不行': 1, '不可能': 1, '做不到': 1, '失败': 2, '延误': 1, '延迟': 1,
-            '风险': 1, '隐患': 1, '问题': 1, '困难': 1, '障碍': 1, '阻碍': 1,
-            '下降': 1, '减少': 1, '亏损': 2, '流失': 1, '违规': 2, '违纪': 2,
-            '偏离': 1, '不当': 1, '不足': 1, '缺乏': 1, '缺失': 1, '遗漏': 1,
-            '警告': 1, '处罚': 1, '违规': 2, '违法': 2, '投诉': 1, '纠纷': 1,
-        }
-        
-        # 否定词
-        negation_words = {'不', '没', '无', '非', '未', '别', '莫', '勿', '否'}
-        # 程度副词
-        degree_words = {'非常': 1.5, '十分': 1.5, '特别': 1.5, '极其': 2, '格外': 1.5,
-                       '比较': 1.2, '相当': 1.3, '很': 1.2, '太': 1.5, '极为': 2}
+        try:
+            from snownlp import SnowNLP
+            
+            s = SnowNLP(text)
+            score = s.sentiments
+            
+            if score > 0.6:
+                sentiment = 'positive'
+            elif score < 0.4:
+                sentiment = 'negative'
+            else:
+                sentiment = 'neutral'
 
-        words = jieba.lcut(text)
-        
-        positive_score = 0
-        negative_score = 0
-        positive_count = 0
-        negative_count = 0
+            return {
+                'sentiment': sentiment,
+                'score': round(score, 4),
+                'positive': 0,
+                'negative': 0,
+                'positive_score': round(score, 2),
+                'negative_score': round(1 - score, 2)
+            }
+        except Exception as e:
+            print(f"snownlp sentiment analysis failed: {e}, using fallback")
+            return _fallback_sentiment_analysis(text)
+    
+    return _fallback_sentiment_analysis(text)
 
-        i = 0
-        while i < len(words):
-            w = words[i]
-            
-            # 检查是否是程度副词
-            degree = 1.0
-            if w in degree_words:
-                degree = degree_words[w]
-                i += 1
-                if i >= len(words):
-                    break
-                w = words[i]
-            
-            # 检查否定词
-            negated = False
-            if w in negation_words:
-                negated = True
-                i += 1
-                if i >= len(words):
-                    break
-                w = words[i]
-            
-            # 计算情感得分
-            if w in positive_words:
-                score = positive_words[w] * degree
-                if negated:
-                    negative_score += score
-                    negative_count += 1
-                else:
-                    positive_score += score
-                    positive_count += 1
-            elif w in negative_words:
-                score = negative_words[w] * degree
-                if negated:
-                    positive_score += score
-                    positive_count += 1
-                else:
-                    negative_score += score
-                    negative_count += 1
-            
+
+def _fallback_sentiment_analysis(text):
+    """
+    备用情绪分析方案（基于词典）
+    """
+    positive_words = {
+        '好': 1, '优秀': 2, '完成': 1, '成功': 2, '进步': 1, '提升': 1, '积极': 1,
+        '满意': 2, '支持': 1, '同意': 1, '通过': 1, '批准': 1, '赞': 1, '赞成': 1,
+        '顺利': 1, '突破': 2, '创新': 1, '高效': 1, '优化': 1, '改善': 1,
+        '增长': 1, '盈利': 1, '超越': 1, '达成': 1, '实现': 1, '解决': 1,
+        '加强': 1, '推进': 1, '落实': 1, '成效': 1, '成果': 1, '收获': 1,
+        '确认': 1, '明确': 1, '完善': 1, '规范': 1, '保障': 1, '确保': 1,
+    }
+    
+    negative_words = {
+        '消极': 1, '反对': 1, '抵制': 2, '抱怨': 1, '不满': 1, '拒绝': 1,
+        '不行': 1, '不可能': 1, '做不到': 1, '失败': 2, '延误': 1, '延迟': 1,
+        '隐患': 1, '困难': 1, '障碍': 1, '阻碍': 1,
+        '下降': 1, '减少': 1, '亏损': 2, '流失': 1, '违规': 2, '违纪': 2,
+        '偏离': 1, '不当': 1, '不足': 1, '缺乏': 1, '缺失': 1, '遗漏': 1,
+        '忽悠': 2, '骗': 2, '蒙': 2, '糊弄': 2, '坑': 2,
+        '麻烦': 1, '混乱': 1, '糟': 1,
+    }
+    
+    context_neutral_words = {
+        '风险', '问题', '讨论', '分析', '评估', '检查', '审核',
+        '要求', '规定', '制度', '政策', '规范', '标准',
+        '禁止', '必须', '应该', '需要', '建议', '决定',
+        '培训', '学习', '会议', '沟通', '交流', '意见',
+    }
+    
+    negation_words = {'不', '没', '无', '非', '未', '别', '莫', '勿', '否'}
+    degree_words = {'非常': 1.5, '十分': 1.5, '特别': 1.5, '极其': 2, '格外': 1.5,
+                   '比较': 1.2, '相当': 1.3, '很': 1.2, '太': 1.5, '极为': 2}
+
+    words = jieba.lcut(text)
+    
+    positive_score = 0
+    negative_score = 0
+
+    i = 0
+    while i < len(words):
+        w = words[i]
+        
+        if w in context_neutral_words:
             i += 1
+            continue
+        
+        degree = 1.0
+        if w in degree_words:
+            degree = degree_words[w]
+            i += 1
+            if i >= len(words):
+                break
+            w = words[i]
+        
+        negated = False
+        if w in negation_words:
+            negated = True
+            i += 1
+            if i >= len(words):
+                break
+            w = words[i]
+        
+        if w in positive_words:
+            score = positive_words[w] * degree
+            if negated:
+                negative_score += score
+            else:
+                positive_score += score
+        elif w in negative_words:
+            score = negative_words[w] * degree
+            if negated:
+                positive_score += score
+            else:
+                negative_score += score
+        
+        i += 1
 
-        total = positive_score + negative_score
-        if total == 0:
-            return {'sentiment': 'neutral', 'score': 0.5, 'positive': 0, 'negative': 0}
+    total = positive_score + negative_score
+    if total == 0:
+        return {'sentiment': 'neutral', 'score': 0.5, 'positive': 0, 'negative': 0, 'positive_score': 0, 'negative_score': 0}
 
-        score = positive_score / total
-        if score > 0.6:
-            sentiment = 'positive'
-        elif score < 0.4:
-            sentiment = 'negative'
-        else:
-            sentiment = 'neutral'
+    score = positive_score / total
+    if score > 0.55:
+        sentiment = 'positive'
+    elif score < 0.45:
+        sentiment = 'negative'
+    else:
+        sentiment = 'neutral'
 
-        return {
-            'sentiment': sentiment,
-            'score': round(score, 4),
-            'positive': positive_count,
-            'negative': negative_count,
-            'positive_score': round(positive_score, 2),
-            'negative_score': round(negative_score, 2)
-        }
-
-    return {'sentiment': 'neutral', 'score': 0.5, 'positive': 0, 'negative': 0}
+    return {
+        'sentiment': sentiment,
+        'score': round(score, 4),
+        'positive': 0,
+        'negative': 0,
+        'positive_score': round(positive_score, 2),
+        'negative_score': round(negative_score, 2)
+    }
