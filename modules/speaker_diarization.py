@@ -7,7 +7,7 @@ warnings.filterwarnings('ignore')
 def speaker_diarization_simple(audio_path, num_speakers=None, timeout=60):
     """
     说话人分离：支持多人交替发言和同时发言场景
-    优先使用 pyannote.audio，未配置时使用改进的聚类算法
+    优先级：pyannote.audio > 增强聚类算法（基于MFCC+谱聚类）
     添加超时机制，避免分析过长时间卡住
     num_speakers=None 时自动估计说话人数量
     """
@@ -16,20 +16,30 @@ def speaker_diarization_simple(audio_path, num_speakers=None, timeout=60):
     result_container = []
 
     def run_diarization():
+        # 方案1：pyannote.audio（需要HF_TOKEN，效果最好）
         try:
             from pyannote.audio import Pipeline
             import torch
 
             hf_token = os.environ.get('HF_TOKEN', '')
-            if not hf_token:
-                print("HF_TOKEN not set, using enhanced clustering diarization")
-                result_container.append(enhanced_diarization(audio_path, num_speakers))
-                return
 
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=hf_token
-            )
+            if hf_token:
+                print("[说话人分离] 使用HF_TOKEN加载pyannote模型...")
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=hf_token
+                )
+            else:
+                print("[说话人分离] 未配置HF_TOKEN，尝试无token加载pyannote模型...")
+                try:
+                    pipeline = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-3.1"
+                    )
+                except Exception as e_no_token:
+                    print(f"[说话人分离] 无token加载失败（pyannote为受限模型，需配置HF_TOKEN）: {e_no_token}")
+                    print("[说话人分离] 降级到增强聚类算法")
+                    result_container.append(enhanced_diarization(audio_path, num_speakers))
+                    return
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
             pipeline = pipeline.to(device)
@@ -47,7 +57,8 @@ def speaker_diarization_simple(audio_path, num_speakers=None, timeout=60):
             result_container.append(speaker_segments)
 
         except Exception as e:
-            print(f"Speaker diarization failed: {e}, using enhanced clustering")
+            print(f"[说话人分离] pyannote加载失败: {e}")
+            print("[说话人分离] 降级到增强聚类算法")
             try:
                 result_container.append(enhanced_diarization(audio_path, num_speakers))
             except Exception as e2:

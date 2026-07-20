@@ -117,6 +117,8 @@
                 <div style="display:flex; gap:12px; align-items:center; margin-bottom:12px; flex-wrap:wrap;">
                     <button class="btn btn-primary" id="realtime-start-btn" onclick="startRealtime()">开始实时转写</button>
                     <button class="btn btn-danger" id="realtime-stop-btn" onclick="stopRealtime()" disabled>停止转写</button>
+                    <button class="btn btn-sm btn-info" onclick="testMicrophone()" style="padding:6px 12px; font-size:12px;">🎤 麦克风测试</button>
+                    <button class="btn btn-sm btn-secondary" onclick="clearTranscription()" style="padding:6px 12px; font-size:12px;">🗑️ 清除屏幕</button>
                     <span id="realtime-status" style="color:#999;">未连接</span>
                     <span id="recording-indicator" style="display:none; color:#ff4d4f;">● 录音中</span>
                 </div>
@@ -128,7 +130,7 @@
                     <button class="btn btn-sm btn-secondary" onclick="refreshMicList()" style="padding:6px 12px; font-size:12px;">刷新列表</button>
                 </div>
                 <div id="realtime-transcription" style="background:#f8f9fa; border-radius:8px; padding:16px; min-height:100px; max-height:300px; overflow-y:auto; font-size:14px; line-height:1.8;">
-                    <span style="color:#999;">点击"开始实时转写"，系统将实时把语音转写为文字...</span>
+                    <span style="color:#999;">点击"开始实时转写"，系统将实时把语音转写为文字...<br>点击"麦克风测试"可检验麦克风是否能正常录音</span>
                 </div>
             </div>
 
@@ -777,28 +779,7 @@
                         el.innerHTML = '';
                     }
                     let html = `<p style="margin-bottom:8px;">${data.text}</p>`;
-                    
-                    // 实时合规告警
-                    if (data.compliance && data.compliance.alerts) {
-                        data.compliance.alerts.forEach(alert => {
-                            html += `<div style="background:#fff1f0; padding:8px; border-left:4px solid #ff4d4f; margin-bottom:8px; font-size:13px;">
-                                ⚠ ${alert.message}
-                            </div>`;
-                        });
-                    }
                     el.innerHTML += html;
-                    el.scrollTop = el.scrollHeight;
-                });
-
-                socket.on('compliance_alert', (data) => {
-                    const el = document.getElementById('realtime-transcription');
-                    if (data.alerts) {
-                        data.alerts.forEach(alert => {
-                            el.innerHTML += `<div style="background:#fff1f0; padding:8px; border-left:4px solid #ff4d4f; margin-bottom:8px; font-size:13px; animation: pulse 1s;">
-                                🔔 ${alert.message}
-                            </div>`;
-                        });
-                    }
                     el.scrollTop = el.scrollHeight;
                 });
 
@@ -821,8 +802,8 @@
                 const micSelect = document.getElementById('mic-select');
                 const selectedDeviceId = micSelect ? micSelect.value : '';
                 const constraints = selectedDeviceId
-                    ? { audio: { deviceId: { exact: selectedDeviceId } } }
-                    : { audio: true };
+                    ? { audio: { deviceId: { exact: selectedDeviceId }, sampleRate: 16000 } }
+                    : { audio: { sampleRate: 16000 } };
                 mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
                 audioContext = new AudioContext({ sampleRate: 16000 });
 
@@ -832,7 +813,7 @@
 
                 processor.onaudioprocess = (e) => {
                     const inputData = e.inputBuffer.getChannelData(0);
-                    // 转为16kHz PCM
+                    // 转为16位PCM
                     const pcmData = new Int16Array(inputData.length);
                     for (let i = 0; i < inputData.length; i++) {
                         pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
@@ -1423,6 +1404,101 @@
                 console.error('获取麦克风列表失败:', err);
                 select.innerHTML = '<option value="">无法获取麦克风列表（请授权麦克风权限）</option>';
             }
+        }
+
+        // 麦克风测试：检验麦克风能否正常录音
+        let testAudioContext = null;
+        let testMediaStream = null;
+        let testAnalyser = null;
+        let testAnimationId = null;
+        let testStartTime = null;
+
+        async function testMicrophone() {
+            const output = document.getElementById('realtime-transcription');
+            
+            if (testMediaStream) {
+                stopTestMicrophone();
+                return;
+            }
+
+            try {
+                const micSelect = document.getElementById('mic-select');
+                const selectedDeviceId = micSelect ? micSelect.value : '';
+                const constraints = selectedDeviceId
+                    ? { audio: { deviceId: { exact: selectedDeviceId } } }
+                    : { audio: true };
+
+                testMediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+                testAudioContext = new AudioContext({ sampleRate: 16000 });
+                
+                const source = testAudioContext.createMediaStreamSource(testMediaStream);
+                testAnalyser = testAudioContext.createAnalyser();
+                testAnalyser.fftSize = 2048;
+                source.connect(testAnalyser);
+
+                testStartTime = Date.now();
+                output.innerHTML = '<div style="color:#52c41a; font-weight:600;">🎤 麦克风测试中（点击按钮停止）...</div>';
+                
+                drawAudioLevel();
+            } catch (err) {
+                output.innerHTML = `<div style="color:#ff4d4f;">❌ 麦克风测试失败: ${err.message}<br>请检查麦克风是否正常连接，并确保浏览器已授权麦克风权限</div>`;
+            }
+        }
+
+        function drawAudioLevel() {
+            if (!testAnalyser || !testMediaStream) return;
+
+            const output = document.getElementById('realtime-transcription');
+            const bufferLength = testAnalyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            testAnalyser.getByteTimeDomainData(dataArray);
+
+            let sum = 0;
+            for (let i = 0; i < bufferLength; i++) {
+                sum += Math.abs(dataArray[i] - 128);
+            }
+            const average = sum / bufferLength;
+            const level = Math.min(100, (average / 64) * 100);
+
+            const elapsed = Math.floor((Date.now() - testStartTime) / 1000);
+            let bars = '';
+            const barCount = 20;
+            const filledBars = Math.floor((level / 100) * barCount);
+            for (let i = 0; i < barCount; i++) {
+                bars += i < filledBars ? '█' : '░';
+            }
+
+            output.innerHTML = `<div style="color:#52c41a; font-weight:600;">🎤 麦克风测试中（点击按钮停止）</div>
+                <div style="margin-top:8px;">
+                    <div style="font-size:12px; color:#666;">音量: ${level.toFixed(1)}%</div>
+                    <div style="font-size:16px; color:#1890ff;">${bars}</div>
+                    <div style="font-size:12px; color:#999; margin-top:4px;">已录制: ${elapsed}秒</div>
+                </div>`;
+
+            testAnimationId = requestAnimationFrame(drawAudioLevel);
+        }
+
+        function stopTestMicrophone() {
+            if (testAnimationId) {
+                cancelAnimationFrame(testAnimationId);
+                testAnimationId = null;
+            }
+            if (testMediaStream) {
+                testMediaStream.getTracks().forEach(track => track.stop());
+                testMediaStream = null;
+            }
+            if (testAudioContext) {
+                testAudioContext.close();
+                testAudioContext = null;
+            }
+            const output = document.getElementById('realtime-transcription');
+            output.innerHTML = '<span style="color:#999;">点击"开始实时转写"，系统将实时把语音转写为文字...<br>点击"麦克风测试"可检验麦克风是否能正常录音</span>';
+        }
+
+        // 清除转写屏幕内容
+        function clearTranscription() {
+            const output = document.getElementById('realtime-transcription');
+            output.innerHTML = '<span style="color:#999;">点击"开始实时转写"，系统将实时把语音转写为文字...<br>点击"麦克风测试"可检验麦克风是否能正常录音</span>';
         }
 
         // 页面加载时自动刷新麦克风列表

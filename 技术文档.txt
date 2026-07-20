@@ -1,91 +1,136 @@
 会议智能分析系统 技术文档
 
-文档版本：v1.0
-创建日期：2026-07-09
+文档版本：v2.0（测试版2）
+更新日期：2026-07-15
 适用范围：会议音频分析与合规比对系统
 
 目录
-一、需求分析
+一、项目概述
 二、系统架构设计
 三、技术选型
-四、功能模块详细设计
+四、核心功能模块详解
 五、数据库设计
 六、API接口设计
-七、部署方案
-八、安全性考虑
-九、性能优化方案
+七、模型体系与降级策略
+八、部署与运行
+九、性能指标与验证结果
+十、已知问题与优化方向
 
-一、需求分析
+一、项目概述
 
-1.1 业务背景
+1.1 项目背景
 
-本系统是基于语音识别技术的会议智能分析平台，核心目标是实现会议内容的自动转写、分析和合规校验，提升会议管理效率和质量把控能力。
+本系统是基于语音识别与自然语言处理技术的会议智能分析平台，核心目标是实现会议内容的自动转写、智能分析和合规校验，提升会议管理效率和质量把控能力。
 
-1.2 功能需求
+1.2 核心能力
 
-根据需求文档，系统主要包含两大核心功能模块：
+- 实时语音转写：浏览器端麦克风采集，WebSocket流式传输，边录边转写
+- 音频上传分析：支持wav/mp3/ogg/flac/m4a等格式上传，批量分析
+- 说话人分离：多人会议自动区分不同发言者，支持自动估计说话人数量
+- 关键词提取：自动抓取会议核心关键词，支持TF-IDF+词性加权
+- 主题分析：基于语义相似度自动识别16类会议主题
+- 会议摘要：三级降级摘要生成（Qwen2.5大模型 → mT5 → TextRank）
+- 情绪分析：正面/中性/负面三分类，配合关键词细粒度分析
+- 合规检查：知识库语义匹配 + 要点覆盖核查 + 风险内容检测 + 智能评分
+- 知识库管理：支持政策/要点/风险关键词等多类型条目，状态启停控制
+- 实时合规告警：转写过程中实时检测风险内容并推送告警
 
-1.2.1 音频分析功能
+1.3 技术亮点
 
-- 实时语音转写：将会议全程语音实时转写为文字
-- 说话人分离：支持多人同时发言、交替发言场景，区分不同人员发言内容
-- 关键词提取：自动抓取会议中的核心关键词和高频讨论内容
-- 主题分析：对全文内容进行语义分析，识别讨论主题和核心方向
-- 音频预处理：自动完成降噪、回声消除和语音增强
-
-1.2.2 合规比对功能
-
-- 知识库管理：后台支持管理人员维护会议文件知识库
-- 文件录入：可录入、修改、更新各类会议文件、会议精神、强制传达要点及管控关键词
-- 动态维护：根据政策迭代情况动态维护知识库内容
-- 语义相似度比对：实时将语音转写内容与政策知识库进行语义相似度比对
-- 要点核查：逐条核查既定必传要点，自动识别未覆盖、未提及的内容
-- 合规评分：自动生成0-100分合规评分，评分权重支持自定义配置
-- 风险识别：识别偏离主题、表述不当、消极负面等风险内容
-
-1.3 非功能需求
-
-- 准确性：语音识别准确率≥95%，语义分析准确率≥90%
-- 实时性：语音转写延迟≤3秒，合规比对延迟≤5秒
-- 可靠性：系统可用性≥99.5%
-- 扩展性：支持至少100人并发会议分析
+- 全开源技术栈，无付费API依赖，支持离线部署
+- 中文优化：bge-small-zh-v1.5语义模型、jieba分词、Qwen2.5中文摘要
+- 多级降级机制：所有AI能力均有降级方案，确保可用性
+- 否定语境识别：避免将"禁止承诺保本保收益"等合规培训内容误判为风险
+- 智能知识库匹配：自动选择最相关的知识库条目计算分数，避免不相关内容拉低评分
 
 二、系统架构设计
 
 2.1 整体架构
 
-采用分层架构设计，分为表示层、应用层、业务逻辑层和数据层。
+采用单体架构 + 模块化设计，前后端分离，WebSocket实时通信。
 
-┌─────────────────────────────────────────────────────┐
-│                    表示层                            │
-│              (Web前端、管理后台)                      │
-├─────────────────────────────────────────────────────┤
-│                    应用层                            │
-│         (API网关、认证授权、请求路由)                  │
-├─────────────────────────────────────────────────────┤
-│                    业务逻辑层                         │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐    │
-│  │ 音频预处理  │ │ 语音识别    │ │ 语义分析    │    │
-│  │ 模块        │ │ 模块        │ │ 模块        │    │
-│  └─────────────┘ └─────────────┘ └─────────────┘    │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐    │
-│  │ 说话人分离  │ │ 知识库管理  │ │ 合规比对    │    │
-│  │ 模块        │ │ 模块        │ │ 模块        │    │
-│  └─────────────┘ └─────────────┘ └─────────────┘    │
-├─────────────────────────────────────────────────────┤
-│                    数据层                            │
-│       (MySQL、Redis、文件存储、模型缓存)              │
-└─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    前端层（浏览器）                       │
+│  实时录音 | 音频上传 | 结果展示 | 知识库管理             │
+│  （原生HTML + JS + Web Audio API + Socket.IO）          │
+├─────────────────────────────────────────────────────────┤
+│                    通信层                                │
+│  HTTP REST API | WebSocket (Socket.IO)                  │
+├─────────────────────────────────────────────────────────┤
+│                    业务逻辑层（modules/）                │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │
+│  │ 音频预处理    │ │ 语音识别     │ │ 说话人分离   │    │
+│  │ 模块         │ │ (Whisper)    │ │ 模块         │    │
+│  └──────────────┘ └──────────────┘ └──────────────┘    │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │
+│  │ 文本分析     │ │ 合规检查     │ │ 实时转写     │    │
+│  │ 模块         │ │ 模块         │ │ 模块         │    │
+│  └──────────────┘ └──────────────┘ └──────────────┘    │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │
+│  │ 会议检测     │ │ 报告生成     │ │ 文件解析     │    │
+│  │ 模块         │ │ 模块         │ │ 模块         │    │
+│  └──────────────┘ └──────────────┘ └──────────────┘    │
+├─────────────────────────────────────────────────────────┤
+│                    数据层                                │
+│  SQLite数据库 | 文件系统（音频/模型）                     │
+└─────────────────────────────────────────────────────────┘
 
-2.2 核心流程图
+2.2 目录结构
 
-2.2.1 音频分析流程
+voice-reco/
+├── app.py                  # Flask主入口，API路由定义
+├── config.py               # 配置文件
+├── database.py             # 数据库初始化
+├── models.py               # 数据模型定义
+├── requirements.txt        # Python依赖清单
+├── modules/                # 业务模块
+│   ├── audio_preprocessor.py    # 音频预处理
+│   ├── speaker_diarization.py   # 说话人分离
+│   ├── text_analyzer.py         # 文本分析（关键词/主题/摘要/情绪）
+│   ├── compliance_checker.py    # 合规检查
+│   ├── realtime_transcriber.py  # 实时转写（WebSocket）
+│   ├── meeting_detector.py      # 会议状态检测
+│   ├── report_generator.py      # 报告生成
+│   ├── file_parser.py           # 文件解析（知识库导入）
+│   └── whisper_utils.py         # Whisper工具函数
+├── templates/
+│   └── index.html          # 前端单页面
+├── tests/                  # 测试文件
+├── uploads/                # 上传音频存储
+├── data/                   # SQLite数据库
+└── models/                 # AI模型本地存储
+    ├── Qwen2.5-1.5B-Instruct/  # 摘要大模型
+    └── bge-small-zh-v1.5/      # 中文语义向量模型
 
-会议音频输入 → 音频预处理(降噪/回声消除) → 语音识别转写 → 说话人分离 → 关键词提取 → 主题分析 → 结果输出
+2.3 核心流程
 
-2.2.2 合规比对流程
+2.3.1 上传音频分析流程
 
-语音转写结果 → 语义相似度计算 → 要点覆盖检查 → 风险内容识别 → 合规评分计算 → 生成合规报告
+用户上传音频 → 保存文件 → 创建会议记录 → 异步线程处理
+  → 音频预处理（降噪/带通滤波/语音增强/归一化）
+  → Whisper语音识别（medium模型）
+  → 说话人分离（谱聚类 + 轮廓系数/BIC估计）
+  → 文本分析（关键词/主题/摘要/情绪）
+  → 合规检查（语义匹配/要点覆盖/风险检测）
+  → 保存结果 → 推送进度 → 完成
+
+2.3.2 实时转写流程
+
+用户点击开始 → WebSocket连接 → 加载Whisper small模型
+  → 浏览器采集音频（16kHz）→ Base64编码发送
+  → 服务端5秒缓存块 → Whisper转写 → 实时合规检查
+  → 结果实时推送前端
+  → 停止转写 → 保存音频文件 → 快速分析 → 保存会议记录
+
+2.3.3 合规检查流程
+
+转写文本 → 筛选active状态知识库条目
+  → 计算与各政策条目的语义相似度 → 取最高相关条目
+  → 智能匹配对应的必传要点模板
+  → 要点覆盖率计算（含否定语境过滤）
+  → 风险关键词检测（含否定语境过滤 + 语义风险检测）
+  → 关键词命中统计
+  → 加权求和 → 生成评分等级与建议
 
 三、技术选型
 
@@ -93,786 +138,761 @@
 
 | 分类 | 技术 | 版本 | 选型理由 |
 |------|------|------|----------|
-| 语言 | Python | 3.10+ | 成熟的AI生态，丰富的语音处理库 |
-| 框架 | Flask | 3.1+ | 轻量灵活，便于快速开发API服务 |
-| 语音识别 | OpenAI Whisper | 20250625 | 多语言支持，高准确率，开源免费 |
-| 说话人分离 | pyannote.audio | 3.1+ | 基于PyTorch的说话人识别框架 |
-| 语义分析 | Transformers | 5.x | HuggingFace生态，丰富的预训练模型 |
-| 关键词提取 | RAKE | 1.4+ | 快速自动关键词提取算法 |
-| 音频处理 | librosa | 0.10+ | 专业音频分析处理库 |
-| 数据库 | MySQL | 8.0+ | 稳定可靠，支持复杂查询 |
-| 缓存 | Redis | 7.0+ | 高性能缓存，支持实时数据处理 |
+| 语言 | Python | 3.10+ | 成熟的AI/ML生态，丰富的语音NLP库 |
+| Web框架 | Flask | 3.1.3 | 轻量灵活，便于快速开发API服务 |
+| 实时通信 | Flask-SocketIO | 5.6.1 | WebSocket实时转写与进度推送 |
+| 跨域 | Flask-CORS | 6.0.5 | 前后端分离跨域支持 |
+| ORM | Flask-SQLAlchemy | 3.1.1 | 数据库ORM，支持SQLite |
+| 语音识别 | OpenAI Whisper | 20250625 | 开源免费，多语言，中文准确率高 |
+| 说话人分离 | pyannote.audio | 3.1.1 | 业界领先的说话人分离（需HF_TOKEN） |
+| 说话人分离（备选） | scikit-learn | 1.5.1 | 谱聚类+GMM，无需额外依赖，离线可用 |
+| 语义向量 | sentence-transformers | 3.0.1 | 语义相似度计算框架 |
+| 语义模型 | bge-small-zh-v1.5 | - | 智源开源中文向量模型，93MB，效果优秀 |
+| 摘要大模型 | Qwen2.5-1.5B-Instruct | - | 阿里通义千问开源，中文摘要质量高 |
+| 摘要备选 | mT5_multilingual_XLSum | - | 多语言摘要模型，CPU可运行 |
+| 文本摘要（保底） | sumy(LSA) | 0.12.0 | 纯Python，无额外模型依赖 |
+| 音频处理 | librosa | 0.10.1 | 专业音频分析处理库 |
+| 音频读写 | soundfile | 0.12.1 | 高效音频文件读写 |
+| 降噪 | noisereduce | 3.0.3 | 谱减法降噪，效果好速度快 |
+| 中文分词 | jieba | 0.42.1 | 中文分词标准库 |
+| 关键词提取 | 自研TF-IDF+词性加权 | - | 基于jieba词性标注，纯Python无依赖 |
+| 数据库 | SQLite | 内置 | 轻量零配置，适合中小规模部署 |
+| 数值计算 | numpy / scipy | 1.26.4 / 1.12.0 | 科学计算基础库 |
 
 3.2 前端技术
 
-| 分类 | 技术 | 版本 | 选型理由 |
-|------|------|------|----------|
-| 框架 | Vue.js | 3.x | 响应式设计，组件化开发 |
-| UI组件 | Element Plus | 2.x | 丰富的组件库，美观易用 |
-| 图表 | ECharts | 5.x | 强大的数据可视化能力 |
-| 语音录制 | Web Audio API | - | 浏览器原生支持，无需插件 |
+| 分类 | 技术 | 说明 |
+|------|------|------|
+| 页面 | 原生HTML/CSS/JS | 单页面应用，无构建工具依赖 |
+| 录音 | Web Audio API | 浏览器原生音频采集，16kHz采样 |
+| 实时通信 | Socket.IO客户端 | WebSocket双向通信 |
+| 音频编码 | Base64 | 音频块编码传输 |
 
-3.3 基础设施
+3.3 模型清单
 
-| 分类 | 技术 | 版本 | 选型理由 |
-|------|------|------|----------|
-| 容器 | Docker | 20.x | 标准化部署，环境一致性 |
-| 编排 | Docker Compose | 2.x | 简化多容器部署 |
-| 反向代理 | Nginx | 1.24+ | 高性能负载均衡 |
+| 模型 | 用途 | 大小 | 协议 | 来源 |
+|------|------|------|------|------|
+| Whisper medium | 上传音频转写 | ~1.5GB | MIT | OpenAI |
+| Whisper small | 实时转写 | ~500MB | MIT | OpenAI |
+| bge-small-zh-v1.5 | 中文语义相似度 | ~93MB | MIT | 智源研究院 |
+| Qwen2.5-1.5B-Instruct | 会议摘要生成 | ~3GB | Apache 2.0 | 阿里通义千问 |
+| mT5_multilingual_XLSum | 摘要备选 | ~1.2GB | Apache 2.0 | csebuetnlp |
 
-四、功能模块详细设计
+四、核心功能模块详解
 
-4.1 音频预处理模块
+4.1 音频预处理模块（audio_preprocessor.py）
 
 4.1.1 功能说明
 
-对输入音频进行预处理，提升语音识别准确率。
+对输入音频进行预处理，提升语音识别准确率。支持完整处理链，每个环节都有降级方案。
 
 4.1.2 处理流程
 
-1. 音频格式转换：统一转换为WAV格式，采样率16kHz，单声道
-2. 噪声检测：使用统计方法检测背景噪声
-3. 降噪处理：基于频谱减法进行噪声抑制
-4. 回声消除：使用自适应滤波器消除空间回声
-5. 语音增强：基于谱增强技术提升语音清晰度
+1. 格式统一：librosa加载，自动重采样到16kHz单声道
+2. 降噪：noisereduce谱减法（首0.5秒估计噪声），失败降级到自研谱减法
+3. 回声消除：80-7000Hz带通滤波（4阶Butterworth）
+4. 语音增强：MMSE短时谱振幅估计（判决引导法估计先验信噪比）
+5. 归一化：RMS归一化到-20dB，防削波
 
-4.1.3 技术实现
+4.1.3 辅助功能
 
-```python
-import librosa
-import numpy as np
-from scipy import signal
+- format_time：秒转MM:SS.mmm格式
+- detect_speech_segments：基于STFT能量的语音活动检测（VAD）
+- get_audio_quality_report：对比处理前后的SNR和降噪效果
 
-def preprocess_audio(audio_path):
-    # 加载音频
-    y, sr = librosa.load(audio_path, sr=16000, mono=True)
-    
-    # 噪声检测与降噪
-    noise_level = np.mean(np.abs(y[:int(sr*0.5)]))
-    y_denoised = y - noise_level * 0.3
-    
-    # 回声消除（简化实现）
-    b, a = signal.butter(4, [300, 3000], btype='band', fs=sr)
-    y_filtered = signal.filtfilt(b, a, y_denoised)
-    
-    # 语音增强
-    y_enhanced = librosa.effects.preemphasis(y_filtered, coef=0.97)
-    
-    return y_enhanced, sr
-```
-
-4.2 语音识别模块
+4.2 语音识别模块（whisper_utils.py）
 
 4.2.1 功能说明
 
-基于OpenAI Whisper实现高精度语音转写。
+基于OpenAI Whisper的语音转写，支持繁简修复。
 
-4.2.2 技术实现
+4.2.2 核心函数
 
-```python
-import whisper
+- transcribe_with_fix：封装Whisper转写，自动修复繁体转简体问题
+- fix_traditional_chinese：繁简转换与常见转写错误修复
 
-def transcribe_audio(audio_path, model_name="medium"):
-    model = whisper.load_model(model_name)
-    result = model.transcribe(audio_path, language="zh")
-    
-    return {
-        "text": result["text"],
-        "segments": result["segments"],
-        "language": result["language"]
-    }
-```
+4.2.3 模型策略
 
-4.3 说话人分离模块
+- 上传分析：使用medium模型（准确率优先）
+- 实时转写：使用small模型（速度优先）
+- 模型预热：服务启动时预加载，避免首次请求延迟
+
+4.3 说话人分离模块（speaker_diarization.py）
 
 4.3.1 功能说明
 
-识别并分离不同说话人的发言内容。
+识别并分离不同说话人的发言内容。采用"优先pyannote，失败降级增强聚类"的策略。
 
-4.3.2 技术实现
+4.3.2 技术方案
 
-使用pyannote.audio进行说话人识别：
+方案A：pyannote.audio（推荐，需HF_TOKEN）
+- 使用 pyannote/speaker-diarization-3.1 管线
+- 支持CUDA加速，自动检测设备
 
-```python
-from pyannote.audio import Pipeline
+方案B：增强聚类算法（默认，离线可用）
+- 特征提取：MFCC(20维) + delta + delta2 + chroma + 频谱质心 + 带宽 + 过零率 + RMS
+- 特征加权：MFCC权重最高(1.0)，加重音色相关特征
+- 语音活动检测：RMS阈值过滤静音帧，只对语音帧聚类
+- 说话人数量估计：轮廓系数 + GMM BIC 联合估计
+  - 轮廓系数：衡量聚类紧密度，越高越好
+  - BIC：贝叶斯信息准则，越小越好
+  - 联合判断：轮廓系数差距<0.02时，选BIC更优的
+- 聚类算法：谱聚类（Spectral Clustering）
+  - affinity='nearest_neighbors'，对非球形簇效果更好
+  - 失败降级：GMM + 层次聚类，再降级：KMeans
+- 后处理：
+  - 非语音帧映射到最近说话人
+  - 中值滤波（窗口5）平滑标签，减少抖动
+  - 合并短于0.3秒的片段
+  - 合并相邻同说话人片段
 
-def speaker_diarization(audio_path, hf_token):
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token
-    )
-    
-    diarization = pipeline(audio_path)
-    
-    speaker_segments = []
-    for segment, _, speaker in diarization.itertracks(yield_label=True):
-        speaker_segments.append({
-            "start": segment.start,
-            "end": segment.end,
-            "speaker": speaker
-        })
-    
-    return speaker_segments
-```
+4.3.3 性能特点
 
-4.4 关键词提取模块
+- 自动估计说话人数量（2-5人）
+- 支持指定说话人数量
+- 60秒超时保护，避免过长音频卡死
+- 3人TTS合成音频可正确分离（谱聚类方案）
 
-4.4.1 功能说明
+4.4 文本分析模块（text_analyzer.py）
 
-自动提取会议中的核心关键词和高频讨论内容。
+4.4.1 关键词提取（extract_keywords）
 
-4.4.2 技术实现
+算法：TF-IDF + 词性加权 + 停用词过滤
 
-```python
-from rake_nltk import Rake
-import jieba
+流程：
+1. jieba词性标注，只保留名词/动词/专有名词等有意义词性
+2. 三级停用词过滤：通用停用词 + 领域停用词 + 长度过滤
+3. TF计算：词频 / 总词数
+4. IDF计算：基于句子分布（词出现的句子越少越重要）
+5. 词性加权：专有名词1.5x / 名词1.3x / 动词1.1x
+6. 按综合得分排序取Top N
 
-def extract_keywords(text, language="zh", top_n=10):
-    if language == "zh":
-        # 使用jieba分词
-        words = jieba.lcut(text)
-        # 过滤停用词
-        stopwords = set(["的", "是", "在", "和", "了", "有", "我", "他", "她", "它"])
-        filtered_words = [w for w in words if w not in stopwords and len(w) > 1]
-        # 统计词频
-        word_freq = {}
-        for word in filtered_words:
-            word_freq[word] = word_freq.get(word, 0) + 1
-        # 返回高频词
-        return sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:top_n]
-    else:
-        r = Rake()
-        r.extract_keywords_from_text(text)
-        return r.get_ranked_phrases()[:top_n]
-```
+4.4.2 主题分析（analyze_topic）
 
-4.5 主题分析模块
+支持16类会议主题：工作汇报、项目讨论、问题解决、决策制定、进度跟进、计划安排、意见交流、培训学习、风险讨论、合规审查、财务预算、人事安排、客户服务、产品设计、技术方案、市场营销。
+
+算法：语义相似度（主）+ 关键词匹配（辅）
+- 语义方案：bge-small-zh-v1.5编码文本与主题名，余弦相似度
+- 关键词方案：每个主题有10个关联关键词，统计命中数
+- 融合：语义分70% + 关键词分30%
+- 超时保护：10秒超时，超时降级到纯关键词匹配
+
+4.4.3 摘要生成（generate_summary）
+
+三级降级机制：
+
+第一级：Qwen2.5-1.5B-Instruct（推荐，质量最高）
+- 指令式对话模板，专业会议摘要系统提示词
+- 要求第三人称、结构化、客观准确
+- 幻觉检测：新闻式模式匹配 + 实体覆盖率校验
+- 生成参数：temperature=0.3，num_beams=1，max_new_tokens=300
+- CPU运行约30-40秒/次
+
+第二级：mT5_multilingual_XLSum（备选）
+- 多语言摘要模型，Seq2Seq架构
+- 同样有幻觉检测保护
+- 生成速度快于Qwen
+
+第三级：TextRank（保底，纯Python无模型依赖）
+- 智能分句：支持无标点文本的基于触发词分句
+- TextRank算法：句子相似度图 + PageRank迭代
+- 位置加权：开头句子1.3x，结尾1.1x
+- 关键词加权：命中关键词的句子额外加分
+- 第三人称转换：50+条人称转换规则
+- 去重：句子签名 + 相似度去重
+- 行动项提取：识别"需要/必须/决定/负责/计划"等引导的句子
+- 质量过滤：过滤问候语、问句、过短句
+
+摘要清洗：
+- 开头/结尾口语词清理（50+条模式）
+- 重复字/词/标点清理
+- 繁简转换
+
+4.4.4 情绪分析（analyze_sentiment）
+
+基于情感词典 + 规则的细粒度情绪分析：
+- 正面/中性/负面三分类
+- 情感词打分 + 程度副词加权 + 否定词反转
+- 细分类别：积极、消极、反对、抱怨等
+- 纯Python实现，无额外依赖
+
+4.5 合规检查模块（compliance_checker.py）
 
 4.5.1 功能说明
 
-对会议内容进行语义分析，识别讨论主题和核心方向。
+核心模块，负责将转写内容与知识库进行语义比对，生成合规评分和报告。
 
-4.5.2 技术实现
+4.5.2 评分权重（可配置）
 
-```python
-from transformers import pipeline
+| 维度 | 默认权重 | 说明 |
+|------|----------|------|
+| 语义相似度 | 40% | 转写内容与政策内容的语义相关度 |
+| 要点覆盖率 | 30% | 必传要点的覆盖比例 |
+| 风险检测 | 20% | 风险内容检测，发现即扣分 |
+| 关键词匹配 | 10% | 政策关键词命中比例 |
 
-def analyze_topic(text, language="zh"):
-    classifier = pipeline("zero-shot-classification",
-                          model="facebook/bart-large-mnli")
-    
-    candidate_topics = ["工作汇报", "项目讨论", "问题解决", "决策制定", 
-                        "进度跟进", "计划安排", "意见交流", "培训学习"]
-    
-    result = classifier(text, candidate_topics, multi_label=True)
-    
-    return {
-        "topics": result["labels"],
-        "scores": result["scores"]
-    }
-```
+4.5.3 评分等级
 
-4.6 知识库管理模块
+- ≥90分：优秀
+- 75-89分：良好
+- 60-74分：合格
+- <60分：不合格
 
-4.6.1 功能说明
+4.5.4 核心算法
 
-管理会议文件、会议精神、强制传达要点及管控关键词。
+语义相似度计算（compute_semantic_similarity）：
+- 主方案：bge-small-zh-v1.5 + 余弦相似度
+- 降级方案：jieba分词 + Jaccard相似度
+- 空文本保护：空输入直接返回0.0
+- 异常自动降级：任何异常都自动切换到简单相似度
 
-4.6.2 数据结构
+智能知识库匹配：
+- 按item_type分类：政策类(policy/meeting_spirit)、要点类(key_points/required)、风险类(risk_keywords/forbidden)
+- 语义相似度排序：找出与转写内容最相关的政策条目
+- 只取最高分计算语义相似度得分，避免不相关内容拉低分数
+- 要点匹配：关键词匹配最多的要点模板 + 政策标题相似度匹配
+- 关键词统计：只统计最相关政策的关键词
 
-```python
-class KnowledgeBaseItem:
-    def __init__(self, item_id, title, content, item_type, keywords, 
-                 required_points=None, status="active", created_at=None):
-        self.item_id = item_id
-        self.title = title
-        self.content = content
-        self.item_type = item_type  # "policy", "meeting_minutes", "key_points", "risk_keywords"
-        self.keywords = keywords
-        self.required_points = required_points or []
-        self.status = status
-        self.created_at = created_at
-```
+否定语境识别（is_negated_context）：
+- 20+条否定词模式：禁止、不得、不能、不要、严禁、不允许等
+- 窗口范围：关键词前15-30字符内检测否定词
+- 正则匹配：双重验证（前缀扫描 + 正则模式）
+- 应用场景：风险关键词检测 + 语义风险检测
 
-4.6.3 核心功能
+语义风险检测（detect_semantic_risks）：
+- 8类表述不当模式：保本保收益、零风险、忽悠客户等
+- 5类消极负面模式：问题太多、没办法、反对意见等
+- 每类配严重程度（high/medium/low）
+- 同样应用否定语境过滤
 
-- 知识库条目增删改查
-- 关键词标签管理
-- 必传要点管理
-- 风险关键词管理
-- 数据导入导出
+实时合规检查（realtime_compliance_check）：
+- 单段文本快速检查
+- 返回风险告警 + 要点覆盖 + 时间节点
+- 用于WebSocket实时转写过程中的即时告警
 
-4.7 合规比对模块
+4.5.5 知识库条目类型
 
-4.7.1 功能说明
+| 类型 | 用途 |
+|------|------|
+| policy / meeting_spirit | 政策文件/会议精神，用于语义相似度匹配 |
+| key_points / required | 必传要点，用于覆盖率计算 |
+| risk_keywords / forbidden | 风险关键词，用于风险检测 |
 
-将语音转写内容与政策知识库进行语义相似度比对，生成合规评分。
+4.5.6 时间节点标记
 
-4.7.2 合规评分算法
+- point_time_markers：必传要点在音频中出现的时间点
+- risk_time_markers：风险内容在音频中出现的时间点
+- 支持跳转播放定位（前端可扩展）
 
-```python
-def calculate_compliance_score(transcription, knowledge_base_items):
-    """
-    计算合规评分（0-100分）
-    
-    评分权重：
-    - 语义相似度匹配：40%
-    - 必传要点覆盖率：30%
-    - 风险内容检测：20%
-    - 关键词命中：10%
-    """
-    
-    score_components = {
-        "semantic_similarity": 0,
-        "point_coverage": 0,
-        "risk_detection": 0,
-        "keyword_matching": 0
-    }
-    
-    # 1. 语义相似度匹配（40分）
-    total_similarity = 0
-    item_count = len(knowledge_base_items)
-    for item in knowledge_base_items:
-        similarity = calculate_semantic_similarity(transcription, item.content)
-        total_similarity += similarity
-    score_components["semantic_similarity"] = (total_similarity / max(item_count, 1)) * 40
-    
-    # 2. 必传要点覆盖率（30分）
-    all_required_points = []
-    covered_points = []
-    for item in knowledge_base_items:
-        all_required_points.extend(item.required_points)
-    
-    for point in all_required_points:
-        if point.lower() in transcription.lower():
-            covered_points.append(point)
-    
-    coverage_rate = len(covered_points) / max(len(all_required_points), 1)
-    score_components["point_coverage"] = coverage_rate * 30
-    
-    # 3. 风险内容检测（20分）
-    risk_keywords = []
-    for item in knowledge_base_items:
-        if item.item_type == "risk_keywords":
-            risk_keywords.extend(item.keywords)
-    
-    risk_count = sum(1 for kw in risk_keywords if kw.lower() in transcription.lower())
-    risk_score = max(0, 20 - risk_count * 5)
-    score_components["risk_detection"] = risk_score
-    
-    # 4. 关键词命中（10分）
-    all_keywords = []
-    matched_keywords = []
-    for item in knowledge_base_items:
-        all_keywords.extend(item.keywords)
-    
-    for kw in all_keywords:
-        if kw.lower() in transcription.lower():
-            matched_keywords.append(kw)
-    
-    keyword_rate = len(matched_keywords) / max(len(all_keywords), 1)
-    score_components["keyword_matching"] = keyword_rate * 10
-    
-    # 总分
-    total_score = sum(score_components.values())
-    
-    return {
-        "total_score": round(total_score, 2),
-        "components": score_components,
-        "covered_points": covered_points,
-        "missing_points": [p for p in all_required_points if p not in covered_points],
-        "risk_keywords_found": [kw for kw in risk_keywords if kw.lower() in transcription.lower()],
-        "matched_keywords": matched_keywords
-    }
+4.6 实时转写模块（realtime_transcriber.py）
 
-def calculate_semantic_similarity(text1, text2):
-    """计算两段文本的语义相似度"""
-    from sentence_transformers import SentenceTransformer, util
-    
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    embedding1 = model.encode(text1, convert_to_tensor=True)
-    embedding2 = model.encode(text2, convert_to_tensor=True)
-    
-    cosine_score = util.cos_sim(embedding1, embedding2).item()
-    return cosine_score
-```
+4.6.1 架构设计
 
-4.7.3 合规报告生成
+基于Flask-SocketIO的WebSocket实时通信，服务端RealtimeTranscriber类管理每个会话。
 
-```python
-def generate_compliance_report(meeting_id, transcription, compliance_result):
-    """生成合规分析报告"""
-    report = {
-        "meeting_id": meeting_id,
-        "report_time": datetime.now().isoformat(),
-        "overall_score": compliance_result["total_score"],
-        "score_level": get_score_level(compliance_result["total_score"]),
-        "detailed_scores": compliance_result["components"],
-        "summary": {
-            "covered_points_count": len(compliance_result["covered_points"]),
-            "total_points_count": len(compliance_result["covered_points"]) + len(compliance_result["missing_points"]),
-            "risk_items_count": len(compliance_result["risk_keywords_found"]),
-            "matched_keywords_count": len(compliance_result["matched_keywords"])
-        },
-        "missing_points": compliance_result["missing_points"],
-        "risk_keywords": compliance_result["risk_keywords_found"],
-        "suggestions": generate_suggestions(compliance_result)
-    }
-    
-    return report
+4.6.2 核心流程
 
-def get_score_level(score):
-    if score >= 90:
-        return "优秀"
-    elif score >= 75:
-        return "良好"
-    elif score >= 60:
-        return "合格"
-    else:
-        return "不合格"
+1. 连接建立：客户端连接 → 服务端确认
+2. 开始转写：客户端发送start_transcription事件
+   - 加载知识库条目和评分权重
+   - 创建RealtimeTranscriber实例
+   - 生成音频文件保存路径
+3. 音频传输：客户端持续发送audio_chunk（Base64编码的PCM数据）
+   - 服务端解码为float32数组
+   - 累积到5秒缓冲 → Whisper small模型转写
+   - 实时合规检查 → 有风险立即推送告警
+   - 转写结果实时推送前端
+4. 停止转写：客户端发送stop_transcription
+   - 处理剩余缓冲
+   - 保存完整音频文件
+   - 快速分析（关键词/主题/摘要/情绪/合规）
+   - 保存会议记录到数据库
+   - 返回最终结果
 
-def generate_suggestions(compliance_result):
-    suggestions = []
-    
-    if compliance_result["total_score"] < 60:
-        suggestions.append("会议内容与政策要求差距较大，建议重新传达")
-    
-    if compliance_result["missing_points"]:
-        suggestions.append(f"以下必传要点未覆盖：{', '.join(compliance_result['missing_points'])}")
-    
-    if compliance_result["risk_keywords_found"]:
-        suggestions.append(f"发现风险内容：{', '.join(compliance_result['risk_keywords_found'])}，请核查")
-    
-    if not suggestions:
-        suggestions.append("会议内容合规，继续保持")
-    
-    return suggestions
-```
+4.6.3 技术要点
+
+- 采样率：16kHz（浏览器端自动降采样）
+- 块大小：5秒处理一次，平衡延迟与效率
+- 音频保存：所有原始音频数据缓存，结束时一次性写入WAV
+- 时长计算：总采样点 / 采样率，避免显示0分钟
+- 音量检测：maxVolume < 0.01时提示检查设备
+- 初始化顺序：Socket连接成功 → 模型加载 → 启动录音
+
+4.7 会议检测模块（meeting_detector.py）
+
+基于音频RMS能量的会议状态自动检测：
+- 语音阈值判断：连续语音≥3秒判定为发言
+- 会议开始：连续语音超过阈值
+- 会议结束：连续静音≥60秒
+- 最短会议：60秒，过滤短语音
+- 参会人数统计：基于说话人分离结果
+- 参与度分布：各说话人发言时长占比
+
+4.8 文件解析模块（file_parser.py）
+
+知识库文件导入支持：
+- .txt：纯文本，按行解析
+- .pdf：PyPDF2或pdfplumber提取文本
+- .docx/.doc：python-docx提取文本
+- 自动识别标题、内容、关键词等字段
 
 五、数据库设计
 
-5.1 数据库表结构
+5.1 数据库选型
 
-5.1.1 meetings（会议表）
+使用SQLite数据库，零配置、文件型存储，适合中小规模部署。
+数据库文件：data/meeting_analysis.db
+
+5.2 表结构
+
+5.2.1 meetings（会议表）
 
 | 字段名 | 类型 | 约束 | 说明 |
 |--------|------|------|------|
-| id | INT | PRIMARY KEY, AUTO_INCREMENT | 会议ID |
+| id | INTEGER | PRIMARY KEY AUTOINCREMENT | 会议ID |
 | title | VARCHAR(255) | NOT NULL | 会议标题 |
 | date | DATETIME | NOT NULL | 会议时间 |
-| duration | INT | | 会议时长（分钟） |
+| duration | INTEGER | | 会议时长（秒） |
 | status | VARCHAR(20) | DEFAULT 'processing' | 状态：processing/finished/failed |
+| audio_path | VARCHAR(500) | | 音频文件路径 |
+| total_score | FLOAT | | 合规总分 |
+| score_level | VARCHAR(20) | | 评分等级 |
+| summary | TEXT | | 会议摘要 |
+| keywords | TEXT | | 关键词（JSON数组） |
+| topics | TEXT | | 主题（JSON数组） |
+| sentiment | TEXT | | 情绪分析（JSON对象） |
 | created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
 | updated_at | DATETIME | ON UPDATE CURRENT_TIMESTAMP | 更新时间 |
 
-5.1.2 transcriptions（转写表）
+5.2.2 transcriptions（转写表）
 
 | 字段名 | 类型 | 约束 | 说明 |
 |--------|------|------|------|
-| id | INT | PRIMARY KEY, AUTO_INCREMENT | 转写ID |
-| meeting_id | INT | FOREIGN KEY | 关联会议ID |
-| speaker | VARCHAR(50) | | 说话人标识 |
+| id | INTEGER | PRIMARY KEY AUTOINCREMENT | 转写ID |
+| meeting_id | INTEGER | FOREIGN KEY | 关联会议ID |
+| speaker | VARCHAR(50) | | 说话人标识（SPEAKER_00等） |
 | text | TEXT | NOT NULL | 转写文本 |
 | start_time | FLOAT | | 开始时间（秒） |
 | end_time | FLOAT | | 结束时间（秒） |
 | confidence | FLOAT | | 置信度 |
-| created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+| language | VARCHAR(10) | | 语言 |
 
-5.1.3 knowledge_base（知识库表）
+5.2.3 knowledge_base（知识库表）
 
 | 字段名 | 类型 | 约束 | 说明 |
 |--------|------|------|------|
-| id | INT | PRIMARY KEY, AUTO_INCREMENT | 条目ID |
+| id | INTEGER | PRIMARY KEY AUTOINCREMENT | 条目ID |
 | title | VARCHAR(255) | NOT NULL | 标题 |
-| content | TEXT | NOT NULL | 内容 |
-| item_type | VARCHAR(50) | NOT NULL | 类型：policy/meeting_minutes/key_points/risk_keywords |
-| keywords | TEXT | | 关键词（JSON数组） |
-| required_points | TEXT | | 必传要点（JSON数组） |
+| content | TEXT | NOT NULL | 内容正文 |
+| item_type | VARCHAR(50) | NOT NULL | 类型：policy/meeting_spirit/key_points/risk_keywords/required/forbidden |
+| keywords | TEXT | | 关键词列表（JSON数组） |
+| required_points | TEXT | | 必传要点列表（JSON数组） |
 | status | VARCHAR(20) | DEFAULT 'active' | 状态：active/inactive |
 | created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
 | updated_at | DATETIME | ON UPDATE CURRENT_TIMESTAMP | 更新时间 |
 
-5.1.4 compliance_reports（合规报告表）
+5.2.4 compliance_reports（合规报告表）
 
 | 字段名 | 类型 | 约束 | 说明 |
 |--------|------|------|------|
-| id | INT | PRIMARY KEY, AUTO_INCREMENT | 报告ID |
-| meeting_id | INT | FOREIGN KEY | 关联会议ID |
+| id | INTEGER | PRIMARY KEY AUTOINCREMENT | 报告ID |
+| meeting_id | INTEGER | FOREIGN KEY UNIQUE | 关联会议ID（一对一） |
 | total_score | FLOAT | NOT NULL | 合规总分 |
 | score_level | VARCHAR(20) | | 评分等级 |
-| detailed_scores | TEXT | | 分项得分（JSON） |
+| detailed_scores | TEXT | | 分项得分（JSON对象） |
 | missing_points | TEXT | | 遗漏要点（JSON数组） |
 | risk_keywords | TEXT | | 风险关键词（JSON数组） |
-| suggestions | TEXT | | 建议（JSON数组） |
+| risk_time_markers | TEXT | | 风险时间节点（JSON数组） |
+| point_time_markers | TEXT | | 要点时间节点（JSON数组） |
+| matched_keywords | TEXT | | 命中关键词（JSON数组） |
+| suggestions | TEXT | | 改进建议（JSON数组） |
 | created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
 
-5.1.5 score_weights（评分权重表）
+5.2.5 score_weights（评分权重表）
 
 | 字段名 | 类型 | 约束 | 说明 |
 |--------|------|------|------|
-| id | INT | PRIMARY KEY, AUTO_INCREMENT | ID |
-| weight_name | VARCHAR(50) | NOT NULL | 权重名称 |
-| weight_value | FLOAT | NOT NULL | 权重值（0-100） |
+| id | INTEGER | PRIMARY KEY AUTOINCREMENT | ID |
+| weight_name | VARCHAR(50) | NOT NULL UNIQUE | 权重名称 |
+| weight_value | FLOAT | NOT NULL | 权重值 |
 | description | VARCHAR(255) | | 描述 |
 | updated_at | DATETIME | ON UPDATE CURRENT_TIMESTAMP | 更新时间 |
 
-5.2 数据库ER图
+5.3 ER关系
 
-meetings 1:N transcriptions
-meetings 1:N compliance_reports
+meetings 1 ─── N transcriptions
+meetings 1 ─── 1 compliance_reports
 knowledge_base 独立表
 score_weights 独立表
 
 六、API接口设计
 
-6.1 音频分析接口
+6.1 页面接口
 
-6.1.1 上传音频并分析
+GET /  → 前端单页面
 
-POST /api/v1/meetings/analyze
+6.2 会议相关接口
 
-请求参数：
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| audio_file | FILE | 是 | 音频文件（支持wav、mp3、ogg） |
-| meeting_title | STRING | 是 | 会议标题 |
-| enable_speaker_diarization | BOOL | 否 | 是否启用说话人分离（默认true） |
-| enable_compliance_check | BOOL | 否 | 是否启用合规检查（默认true） |
+6.2.1 上传音频并创建分析任务
 
-响应示例：
+POST /api/meetings
+
+请求：multipart/form-data
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| audio_file | FILE | 是 | 音频文件（wav/mp3/ogg/flac/m4a） |
+| meeting_title | STRING | 否 | 会议标题，默认"未命名会议" |
+| enable_diarization | STRING | 否 | 是否分离说话人，默认false |
+| enable_compliance | STRING | 否 | 是否合规检查，默认true |
+
+响应：
 ```json
 {
-    "code": 200,
-    "message": "分析完成",
-    "data": {
-        "meeting_id": 1,
-        "title": "2024年度工作总结会议",
-        "transcription": [
-            {
-                "speaker": "SPEAKER_00",
-                "text": "各位同事，今天我们召开年度工作总结会议...",
-                "start_time": 0.0,
-                "end_time": 15.5,
-                "confidence": 0.98
-            }
-        ],
-        "keywords": [
-            {"word": "工作总结", "frequency": 5},
-            {"word": "目标", "frequency": 3}
-        ],
-        "topics": [
-            {"topic": "工作汇报", "score": 0.92},
-            {"topic": "计划安排", "score": 0.78}
-        ]
-    }
+  "code": 200,
+  "message": "分析已开始",
+  "meeting_id": 1
 }
 ```
 
-6.1.2 获取会议详情
+6.2.2 获取会议列表
 
-GET /api/v1/meetings/{meeting_id}
+GET /api/meetings?page=1&page_size=10&status=finished
 
-响应示例：
+响应：
 ```json
 {
-    "code": 200,
-    "data": {
-        "meeting_id": 1,
-        "title": "2024年度工作总结会议",
-        "date": "2024-01-15T10:00:00",
-        "duration": 120,
-        "status": "finished",
-        "transcription": [...],
-        "keywords": [...],
-        "topics": [...]
-    }
+  "code": 200,
+  "data": [{ "id": 1, "title": "...", "date": "...", ... }],
+  "total": 100,
+  "page": 1,
+  "page_size": 10
 }
 ```
 
-6.1.3 获取会议列表
+6.2.3 获取会议详情
 
-GET /api/v1/meetings
+GET /api/meetings/<id>
 
-请求参数：
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| page | INT | 否 | 页码（默认1） |
-| page_size | INT | 否 | 每页数量（默认10） |
-| status | STRING | 否 | 状态过滤 |
+响应包含：会议基本信息 + 转写段落 + 合规报告
 
-6.2 知识库管理接口
+6.2.4 获取分析进度
 
-6.2.1 创建知识库条目
+GET /api/meetings/<id>/progress
 
-POST /api/v1/knowledge-base
-
-请求参数：
+响应：
 ```json
 {
-    "title": "2024年政策要点",
-    "content": "根据上级文件要求，本年度重点工作包括...",
-    "item_type": "policy",
-    "keywords": ["政策", "重点工作", "要求"],
-    "required_points": ["安全生产", "质量管控", "合规经营"]
+  "code": 200,
+  "data": {
+    "progress": 65,
+    "message": "正在生成会议摘要..."
+  }
 }
 ```
 
-6.2.2 更新知识库条目
+6.2.5 删除会议
 
-PUT /api/v1/knowledge-base/{item_id}
+DELETE /api/meetings/<id>
 
-6.2.3 删除知识库条目
+6.3 知识库相关接口
 
-DELETE /api/v1/knowledge-base/{item_id}
+6.3.1 获取知识库列表
 
-6.2.4 获取知识库列表
+GET /api/knowledge-base?page=1&page_size=20&item_type=policy&status=active
 
-GET /api/v1/knowledge-base
+6.3.2 创建知识库条目
 
-6.2.5 搜索知识库
+POST /api/knowledge-base
 
-GET /api/v1/knowledge-base/search?q={keyword}
-
-6.3 合规比对接口
-
-6.3.1 获取合规报告
-
-GET /api/v1/meetings/{meeting_id}/compliance
-
-响应示例：
+请求体：
 ```json
 {
-    "code": 200,
-    "data": {
-        "meeting_id": 1,
-        "total_score": 85.5,
-        "score_level": "良好",
-        "detailed_scores": {
-            "semantic_similarity": 38.0,
-            "point_coverage": 25.5,
-            "risk_detection": 20.0,
-            "keyword_matching": 2.0
-        },
-        "missing_points": ["质量管控"],
-        "risk_keywords": [],
-        "suggestions": ["以下必传要点未覆盖：质量管控"]
-    }
+  "title": "理财产品销售合规管理办法",
+  "content": "理财产品销售必须遵守合规要求...",
+  "item_type": "policy",
+  "keywords": ["风险", "销售", "合规"],
+  "required_points": ["投资者风险测评", "风险告知义务"]
 }
 ```
 
-6.3.2 更新评分权重
+6.3.3 更新知识库条目
 
-PUT /api/v1/score-weights
+PUT /api/knowledge-base/<id>
 
-请求参数：
-```json
-{
-    "semantic_similarity": 40,
-    "point_coverage": 30,
-    "risk_detection": 20,
-    "keyword_matching": 10
-}
-```
+6.3.4 删除知识库条目
 
-6.4 健康检查接口
+DELETE /api/knowledge-base/<id>
 
-GET /api/v1/health
+6.3.5 切换启停状态
 
-响应示例：
-```json
-{"status": "ok", "message": "API service is running"}
-```
+POST /api/knowledge-base/<id>/toggle
 
-七、部署方案
+6.3.6 文件导入
 
-7.1 Docker部署
+POST /api/knowledge-base/import
+（支持txt/pdf/docx/doc文件导入）
 
-7.1.1 Dockerfile
+6.4 评分权重接口
 
-```dockerfile
-FROM python:3.10-slim
+GET /api/score-weights → 获取所有权重
+PUT /api/score-weights → 批量更新权重
 
-WORKDIR /app
+6.5 健康检查
 
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && apt-get install -y ffmpeg git gcc g++ make \
-    && rm -rf /var/lib/apt/lists/*
+GET /api/health
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+响应：{"code": 200, "status": "ok", "message": "API service is running"}
 
-COPY . .
+6.6 WebSocket事件
 
-EXPOSE 5000
+服务端事件：
+- connected：连接成功
+- transcription_started：转写已开始
+- transcription_result：实时转写结果
+- compliance_alert：实时合规告警
+- transcription_final：最终转写结果
+- analysis_progress：上传分析进度
+- error：错误信息
 
-CMD ["python", "app.py"]
-```
+客户端事件：
+- start_transcription：开始转写
+- audio_chunk：音频块数据（Base64）
+- stop_transcription：停止转写
 
-7.1.2 docker-compose.yml
+七、模型体系与降级策略
 
-```yaml
-version: '3.8'
+7.1 设计原则
 
-services:
-  web:
-    build: .
-    ports:
-      - "5000:5000"
-    environment:
-      - FLASK_ENV=production
-      - MYSQL_HOST=db
-      - MYSQL_USER=admin
-      - MYSQL_PASSWORD=password
-      - MYSQL_DB=meeting_analysis
-      - REDIS_HOST=redis
-    depends_on:
-      - db
-      - redis
-    volumes:
-      - ./models:/root/.cache/whisper
-      - ./uploads:/app/uploads
+- 可用性优先：任何模型加载失败都有降级方案
+- 渐进式质量：从高级模型到基础算法逐级降级
+- 自动切换：异常自动捕获并切换，无需人工干预
+- 离线可用：核心模型支持本地加载，不依赖网络
 
-  db:
-    image: mysql:8.0
-    environment:
-      - MYSQL_ROOT_PASSWORD=root_password
-      - MYSQL_USER=admin
-      - MYSQL_PASSWORD=password
-      - MYSQL_DATABASE=meeting_analysis
-    volumes:
-      - mysql_data:/var/lib/mysql
-    ports:
-      - "3306:3306"
+7.2 降级链路
 
-  redis:
-    image: redis:7.0
-    volumes:
-      - redis_data:/data
-    ports:
-      - "6379:6379"
+7.2.1 摘要生成降级链
 
-volumes:
-  mysql_data:
-  redis_data:
-```
+Qwen2.5-1.5B-Instruct → mT5_multilingual_XLSum → TextRank(LSA) → TextRank(自研)
 
-7.2 环境变量配置
+每一级失败条件：
+- Qwen → mT5：模型文件不存在 / 加载失败 / 生成失败 / 幻觉检测不通过
+- mT5 → LSA：模型下载失败 / 加载失败 / 生成失败 / 幻觉检测不通过
+- LSA → 自研TextRank：sumy导入失败 / 运行异常
+- 自研TextRank：保底方案，纯Python无依赖
 
-```bash
-# Flask配置
-FLASK_ENV=production
-FLASK_APP=app.py
+7.2.2 语义相似度降级链
 
-# 数据库配置
-MYSQL_HOST=localhost
-MYSQL_PORT=3306
-MYSQL_USER=admin
-MYSQL_PASSWORD=password
-MYSQL_DB=meeting_analysis
+bge-small-zh-v1.5 (sentence-transformers) → jieba分词 + Jaccard相似度
 
-# Redis配置
-REDIS_HOST=localhost
-REDIS_PORT=6379
+降级触发：
+- sentence-transformers导入失败（如torchcodec问题）
+- 模型文件不存在且无法下载
+- 编码过程异常
+- 输入文本为空
 
-# HuggingFace配置
-HF_TOKEN=your_huggingface_token
+7.2.3 说话人分离降级链
 
-# 模型配置
-WHISPER_MODEL=medium
-SPEAKER_DIARIZATION_ENABLED=true
-```
+pyannote.audio → 谱聚类 → GMM+层次聚类 → KMeans → 返回空结果
 
-7.3 启动命令
+降级触发：
+- 无HF_TOKEN / pyannote不可用
+- 谱聚类失败（如样本量不足）
+- 各种聚类算法依次失败
 
-```bash
-# 开发环境
-python app.py
+7.2.4 主题分析降级链
 
-# Docker部署
-docker-compose up -d
+bge语义相似度（10s超时） → 关键词匹配
 
-# 查看日志
-docker-compose logs -f
-```
+7.3 模型加载优化
 
-八、安全性考虑
+- 懒加载：首次使用时才加载，加速服务启动
+- 全局缓存：加载后缓存到全局变量，避免重复加载
+- 离线优先：优先从本地models/目录加载，减少网络依赖
+- 国内镜像：HuggingFace下载使用hf-mirror.com镜像
 
-8.1 数据安全
+7.4 常见问题与解决方案
 
-- 音频文件和转写内容加密存储
-- 敏感数据传输使用HTTPS
-- 数据库访问控制，最小权限原则
+7.4.1 torchcodec导致sentence-transformers加载失败
 
-8.2 API安全
+问题：torch 2.12.0自动加载torchcodec 0.14.0（视频解码器），但找不到FFmpeg DLL，异常导致sentence-transformers整体加载失败。
 
-- API访问令牌认证（JWT）
-- 请求频率限制（Rate Limiting）
-- 请求参数校验和过滤
-- SQL注入防护
+解决：pip uninstall torchcodec -y（sentence-transformers不需要视频解码库）
 
-8.3 权限管理
+7.4.2 HuggingFace下载慢/失败
 
-- 基于角色的访问控制（RBAC）
-- 管理员、普通用户、只读用户角色划分
-- 操作日志记录
+解决：配置环境变量 HF_ENDPOINT=https://hf-mirror.com
 
-8.4 文件安全
+7.4.3 模型占用内存过大
 
-- 文件上传类型白名单限制
-- 文件大小限制
-- 文件内容安全扫描
+解决：
+- 仅加载需要的模型（按需懒加载）
+- 使用更小的模型版本（如small代替medium）
+- CPU推理（device_map='cpu'）
+- 量化：可进一步使用int8/int4量化减少内存
 
-九、性能优化方案
+八、部署与运行
 
-9.1 模型优化
+8.1 环境要求
 
-- 使用量化模型减少内存占用
-- 模型预热，提前加载到内存
-- 模型缓存，避免重复加载
+- Python 3.10 及以上
+- 内存：≥8GB（推荐16GB，需加载多个模型）
+- 磁盘：≥10GB（模型文件约5GB）
+- 操作系统：Windows / Linux / macOS
 
-9.2 并发处理
+8.2 安装步骤
 
-- 使用异步处理框架（Celery）
-- 任务队列管理
-- 多进程/多线程处理
+1. 克隆项目
+2. 安装依赖：pip install -r requirements.txt
+3. 下载模型（可选，首次运行自动下载）：
+   - Whisper：首次运行自动下载
+   - bge-small-zh-v1.5：放入models/bge-small-zh-v1.5/
+   - Qwen2.5-1.5B-Instruct：放入models/Qwen2.5-1.5B-Instruct/
+4. 启动服务：python app.py
+5. 浏览器访问：http://127.0.0.1:5000
 
-9.3 缓存策略
+8.3 配置项（config.py）
 
-- Redis缓存高频访问数据
-- 转写结果缓存
-- 知识库内容缓存
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| SECRET_KEY | 'meeting-analysis-secret-key' | Flask密钥 |
+| UPLOAD_FOLDER | uploads/ | 上传文件目录 |
+| ALLOWED_EXTENSIONS | wav/mp3/ogg/flac/m4a | 允许的音频格式 |
+| WHISPER_MODEL | medium | 上传分析用Whisper模型 |
+| WHISPER_MODEL_REALTIME | small | 实时转写用Whisper模型 |
+| SQLALCHEMY_DATABASE_URI | sqlite:///data/meeting_analysis.db | 数据库路径 |
+| MAX_CONTENT_LENGTH | 256MB | 最大上传文件大小 |
+| HF_TOKEN | '' | HuggingFace Token（pyannote用） |
+| SCORE_WEIGHTS | 见上 | 合规评分权重 |
 
-9.4 数据库优化
+8.4 环境变量
 
-- 索引优化
-- 查询优化
-- 读写分离
+- HF_TOKEN：HuggingFace访问令牌（pyannote说话人分离需要）
+- WHISPER_MODEL：覆盖默认Whisper模型
+- HF_ENDPOINT：HuggingFace镜像地址（国内建议设为https://hf-mirror.com）
+- HF_HUB_OFFLINE：设为1则完全离线模式
+- TRANSFORMERS_OFFLINE：设为1则transformers离线模式
 
-9.5 负载均衡
+8.5 初始化数据
 
-- Nginx反向代理
-- 多实例部署
-- 动态扩容
+首次启动自动创建：
+- SQLite数据库和所有表
+- 金融合规知识库模板（3条）：
+  - 理财产品销售合规管理办法（policy）
+  - 金融销售风险关键词（risk_keywords）
+  - 理财销售必传要点（key_points）
 
-附录：依赖清单
+九、性能指标与验证结果
 
-核心Python依赖：
-- flask==3.1.3
-- flask-cors==6.0.5
-- openai-whisper==20250625
-- pyannote-audio==3.1.1
-- transformers==5.13.0
-- torch==2.12.0
-- librosa==0.10.1
-- rake-nltk==1.4.6
-- jieba==0.42.1
-- sentence-transformers==3.0.1
-- mysql-connector-python==8.4.0
-- redis==5.0.1
-- celery==5.4.0
+9.1 测试环境
 
-开发依赖：
-- pytest==8.3.0
-- pytest-cov==5.0.0
-- flake8==7.1.1
+- CPU：普通桌面级CPU
+- 内存：16GB
+- 模型：全部本地加载，离线运行
+
+9.2 功能验证
+
+9.2.1 合规评分验证
+
+测试音频：4分56秒，3人理财合规培训对话
+
+验证结果（测试版2）：
+- 总分：82.61分（合格）
+- 语义相似度：32.88/40（82.2%）
+- 要点覆盖率：19.73/30（65.8%）
+- 风险检测：20/20（0风险词）
+- 关键词匹配：10/10（全命中）
+
+相比降级方案（simple_similarity，23.85分）提升显著。
+
+9.2.2 语义模型效果
+
+bge-small-zh-v1.5 相似度测试：
+- 相关文本（理财产品风险测评 / 销售前要做风险评估）：0.84
+- 不相关文本（理财产品 / 今天天气真好）：0.32
+- 区分度优秀，阈值0.5可有效分离相关/不相关
+
+9.2.3 说话人分离
+
+3人TTS合成音频（谱聚类方案）：
+- 可正确分离出3个说话人（SPEAKER_00/01/02）
+- 因TTS音色接近，分布可能不均
+- 指定人数时准确率更高
+
+9.2.4 摘要生成
+
+Qwen2.5-1.5B-Instruct CPU运行：
+- 首次加载：约20-30秒
+- 单次生成：约30-40秒
+- 生成质量：结构化、条理清晰、第三人称准确
+- 幻觉检测：有效过滤新闻式幻觉内容
+
+9.3 耗时参考（CPU环境）
+
+- 音频预处理（5分钟音频）：~5秒
+- Whisper medium转写（5分钟）：~30-60秒
+- 说话人分离（5分钟）：~10-20秒
+- 关键词+主题+情绪：~1-2秒
+- 摘要生成（Qwen2.5）：~30-40秒
+- 合规检查：~1-3秒
+- 总计（5分钟音频）：~2-3分钟
+
+十、已知问题与优化方向
+
+10.1 已知问题
+
+1. 说话人分离在TTS合成音频上效果有限（音色过于接近），真实录音效果更好
+2. Qwen2.5摘要CPU运行较慢（30-40秒），GPU可大幅加速
+3. 实时转写使用small模型，准确率略低于medium
+4. 知识库语义匹配需要人工维护关键词，初期配置成本
+5. 前端为原生JS单页，交互体验有优化空间
+
+10.2 优化方向
+
+1. 说话人分离：集成wespeaker等中文声纹模型，提升分离准确率
+2. 摘要加速：使用int4/int8量化或更小模型，或流式生成
+3. 实时转写：集成Paraformer等端到端实时模型，降低延迟
+4. 知识库：增加自动摘要和关键词提取，降低录入成本
+5. 前端：使用Vue/React重构，提升交互体验
+6. 部署：Docker容器化，支持横向扩展
+7. 并发：引入任务队列（Celery），支持批量分析
+8. 多语言：扩展英文/粤语等更多语言支持
+
+附录A：依赖清单（requirements.txt）
+
+flask==3.1.3
+flask-cors==6.0.5
+flask-sqlalchemy==3.1.1
+flask-socketio==5.6.1
+openai-whisper==20250625
+torch==2.12.0
+transformers==5.13.0
+sentence-transformers==3.0.1
+librosa==0.10.1
+scipy==1.12.0
+numpy==1.26.4
+soundfile==0.12.1
+sounddevice==0.4.7
+jieba==0.42.1
+scikit-learn==1.5.1
+pyannote.audio==3.1.1
+noisereduce==3.0.3
+pydub==0.25.1
+SpeechRecognition==3.10.0
+sumy==0.12.0
+nltk==3.10.0
+opencv-python==4.10.0.84
+
+附录B：版本历史
+
+v2.0（测试版2）- 2026-07-15
+- 语义模型升级为bge-small-zh-v1.5中文向量模型
+- 修复torchcodec兼容性问题
+- 添加空文本保护，修复tensor reshape报错
+- 说话人分离优化：谱聚类 + 轮廓系数/BIC联合估计
+- 合规评分优化：智能知识库匹配 + 否定语境识别
+- 新增Qwen2.5-1.5B-Instruct摘要大模型
+- 三级降级摘要机制完善
+- 删除根目录临时测试脚本
+
+v1.0 - 2026-07-09
+- 初始版本，基础功能实现

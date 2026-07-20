@@ -3,6 +3,7 @@
 关键词提取、摘要生成、主题分析、情绪分析
 使用TF-IDF、TextRank、词性过滤等技术提升精准度
 """
+import os
 import jieba
 import jieba.posseg as pseg
 from collections import Counter, defaultdict
@@ -26,36 +27,48 @@ def get_sumy_summarizer():
 # ========== Qwen2.5 摘要大模型（主模型，推荐） ==========
 _qwen_model = None
 _qwen_tokenizer = None
-_QWEN_MODEL_PATH = r'd:\games\新建文件夹 (7)\voice-reco\models\Qwen2.5-1.5B-Instruct'
+_QWEN_MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models', 'Qwen2.5-1.5B-Instruct')
 
 def get_qwen_model():
-    """加载并缓存Qwen2.5-1.5B-Instruct指令模型"""
+    """加载并缓存Qwen2.5-1.5B-Instruct指令模型，本地没有则自动下载"""
     global _qwen_model, _qwen_tokenizer
     if _qwen_model is not None:
         return _qwen_model, _qwen_tokenizer
 
-    import os
-    if not os.path.exists(_QWEN_MODEL_PATH):
-        print("[摘要模型] Qwen2.5模型目录不存在")
-        return None, None
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    # 优先从本地加载
+    if os.path.exists(_QWEN_MODEL_PATH):
+        try:
+            print("[摘要模型] 从本地加载Qwen2.5-1.5B-Instruct...")
+            _qwen_tokenizer = AutoTokenizer.from_pretrained(_QWEN_MODEL_PATH, local_files_only=True)
+            _qwen_model = AutoModelForCausalLM.from_pretrained(
+                _QWEN_MODEL_PATH,
+                torch_dtype='auto',
+                device_map='cpu',
+                local_files_only=True
+            )
+            _qwen_model.eval()
+            print(f"[摘要模型] Qwen2.5加载完成 ({sum(p.numel() for p in _qwen_model.parameters())/1e6:.0f}M参数)")
+            return _qwen_model, _qwen_tokenizer
+        except Exception as e:
+            print(f"[摘要模型] 本地加载失败: {e}")
+
+    # 本地没有，从HuggingFace下载
     try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        os.environ['HF_HUB_OFFLINE'] = '1'
-
-        print("[摘要模型] 正在加载Qwen2.5-1.5B-Instruct...")
-        _qwen_tokenizer = AutoTokenizer.from_pretrained(_QWEN_MODEL_PATH, local_files_only=True)
+        print("[摘要模型] 本地未找到Qwen2.5，正在从HuggingFace下载（约3GB，首次需较长时间）...")
+        model_id = 'Qwen/Qwen2.5-1.5B-Instruct'
+        _qwen_tokenizer = AutoTokenizer.from_pretrained(model_id)
         _qwen_model = AutoModelForCausalLM.from_pretrained(
-            _QWEN_MODEL_PATH,
+            model_id,
             torch_dtype='auto',
-            device_map='cpu',
-            local_files_only=True
+            device_map='cpu'
         )
         _qwen_model.eval()
-        print(f"[摘要模型] Qwen2.5加载完成 ({sum(p.numel() for p in _qwen_model.parameters())/1e6:.0f}M参数)")
+        print(f"[摘要模型] Qwen2.5下载并加载完成 ({sum(p.numel() for p in _qwen_model.parameters())/1e6:.0f}M参数)")
         return _qwen_model, _qwen_tokenizer
     except Exception as e:
-        print(f"[摘要模型] Qwen2.5加载失败: {e}")
+        print(f"[摘要模型] Qwen2.5下载失败: {e}")
         _qwen_model = None
         _qwen_tokenizer = None
         return None, None
@@ -109,8 +122,6 @@ def get_mt5_model():
 
     try:
         from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-        import os
-        os.environ['HF_HUB_OFFLINE'] = '1'
 
         print("[摘要模型] 正在加载mT5摘要大模型...")
         _mt5_tokenizer = AutoTokenizer.from_pretrained('csebuetnlp/mT5_multilingual_XLSum', legacy=True)

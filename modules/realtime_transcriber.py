@@ -45,20 +45,30 @@ class RealtimeTranscriber:
         返回转写结果和合规检查结果（如果有）
         同时保存音频数据用于最终生成音频文件
         """
-        if isinstance(audio_data, bytes):
-            audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-        else:
-            audio_np = audio_data
+        try:
+            if isinstance(audio_data, bytes):
+                if len(audio_data) == 0:
+                    print('[实时转写] 空音频块，跳过')
+                    return None
+                audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                audio_np = audio_data
 
-        self.buffer.append(audio_np)
-        
-        # 保存音频数据用于最终生成文件
-        self.all_audio_data.append(audio_np.copy())
+            if len(audio_np) == 0:
+                print('[实时转写] 空音频数据，跳过')
+                return None
 
-        # 检查是否积累足够的音频
-        total_samples = sum(len(chunk) for chunk in self.buffer)
-        if total_samples >= self.chunk_samples:
-            return self._process_buffer()
+            self.buffer.append(audio_np)
+            
+            # 保存音频数据用于最终生成文件
+            self.all_audio_data.append(audio_np.copy())
+
+            # 检查是否积累足够的音频
+            total_samples = sum(len(chunk) for chunk in self.buffer)
+            if total_samples >= self.chunk_samples:
+                return self._process_buffer()
+        except Exception as e:
+            print(f'[实时转写] 音频块处理错误: {e}')
         return None
     
     def save_audio_file(self):
@@ -90,8 +100,10 @@ class RealtimeTranscriber:
         audio = np.concatenate(self.buffer)
         self.buffer = []
 
-        # 检查长度
-        if len(audio) < int(self.sr * self.min_audio_length):
+        # 检查长度（至少需要0.5秒）
+        min_samples = int(self.sr * 0.5)
+        if len(audio) < min_samples:
+            print(f'[实时转写] 音频太短，跳过: {len(audio)} samples')
             return None
 
         # 写入临时文件
@@ -305,12 +317,8 @@ def register_socketio_events(socketio, whisper_model):
             result = transcriber.add_audio_chunk(audio_bytes)
 
             if result:
-                # 发送转写结果
+                # 发送转写结果（实时转写不推送合规告警）
                 socketio.emit('transcription_result', result, to=sid)
-                
-                # 如果有合规告警，发送告警
-                if result.get('compliance') and result['compliance'].get('alerts'):
-                    socketio.emit('compliance_alert', result['compliance'], to=sid)
 
         except Exception as e:
             print(f'Audio chunk error: {e}')
@@ -331,13 +339,14 @@ def register_socketio_events(socketio, whisper_model):
             # 2. 获取最终转写结果
             result = transcriber.get_final_result()
             
-            # 3. 快速分析（跳过耗时步骤）
+            # 3. 快速分析（包含说话人分离）
             if audio_file_path:
                 full_analysis = _perform_fast_analysis(
                     audio_file_path,
                     transcriber.language,
                     transcriber.knowledge_items,
-                    transcriber.score_weights
+                    transcriber.score_weights,
+                    transcriber.whisper_model
                 )
                 if full_analysis:
                     result.update(full_analysis)
@@ -450,26 +459,49 @@ def _perform_full_analysis(audio_path, language, knowledge_items, score_weights=
         return None
 
 
-def _perform_fast_analysis(audio_path, language, knowledge_items, score_weights=None):
+def _perform_fast_analysis(audio_path, language, knowledge_items, score_weights=None, whisper_model=None):
     """
-    快速分析（跳过耗时步骤）
-    不做音频预处理和说话人分离，直接使用原始音频转写
+    快速分析（包含说话人分离）
+    使用完整音频重新转写，提高准确性
     """
     try:
         from modules.text_analyzer import extract_keywords, analyze_topic, generate_summary, analyze_sentiment
         from modules.compliance_checker import calculate_compliance_score, get_score_level
-
-        # 直接转写（不做音频预处理，使用繁简修复）
-        from app import whisper_model
+        from modules.speaker_diarization import speaker_diarization_simple
         from modules.whisper_utils import transcribe_with_fix
+
+        # 使用传入的模型，如果没有则尝试从app导入
+        if whisper_model is None:
+            from app import whisper_model_realtime
+            whisper_model = whisper_model_realtime
+        
+        if whisper_model is None:
+            print('[快速分析] 没有可用的Whisper模型')
+            return None
+
+        # 直接转写（使用繁简修复）
         full_result = transcribe_with_fix(whisper_model, audio_path, language=language)
         full_text = full_result['text']
 
-        # 生成转写段落（不做说话人分离）
+        # 说话人分离
+        speaker_segments = []
+        try:
+            speaker_segments = speaker_diarization_simple(audio_path)
+            print(f'[快速分析] 说话人分离完成，识别到{len(set(s["speaker"] for s in speaker_segments))}个说话人')
+        except Exception as e:
+            print(f'[快速分析] 说话人分离失败: {e}')
+
+        # 生成带说话人的转写段落
         transcriptions = []
         for seg in full_result['segments']:
+            speaker = 'SPEAKER_00'
+            if speaker_segments:
+                for ss in speaker_segments:
+                    if ss['start'] <= seg['start'] <= ss['end']:
+                        speaker = ss['speaker']
+                        break
             transcriptions.append({
-                'speaker': 'SPEAKER_00',
+                'speaker': speaker,
                 'text': seg['text'],
                 'start_time': seg['start'],
                 'end_time': seg['end'],
