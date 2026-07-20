@@ -280,85 +280,103 @@ def register_socketio_events(socketio):
         sid = request.sid
         print(f'[停止转写] 收到停止请求，sid={sid}')
 
-        if sid in transcribers:
-            transcriber = transcribers[sid]
-            print(f'[停止转写] 找到转写器，audio_file_path={transcriber.audio_file_path}')
-            
-            audio_file_path = transcriber.save_audio_file()
-            print(f'[停止转写] 音频文件保存: {audio_file_path}')
-            
-            result = transcriber.get_final_result()
-            print(f'[停止转写] 最终转写结果: text长度={len(result.get("text", ""))}, segments={len(result.get("segments", []))}')
-
-            result['audio_file'] = audio_file_path
-            result['audio_duration'] = len(transcriber.all_audio_data) * 0.1
-            print(f'[停止转写] 音频时长: {result["audio_duration"]}')
-
-            socketio.emit('transcription_stopped', {
-                'audio_file': audio_file_path,
-                'audio_duration': result['audio_duration'],
-                'text': result.get('text', '')
-            }, to=sid)
-            print(f'[停止转写] 已发送 transcription_stopped 事件')
-
-            def _analyze_async():
+        try:
+            if sid in transcribers:
+                transcriber = transcribers[sid]
+                print(f'[停止转写] 找到转写器，audio_file_path={transcriber.audio_file_path}')
+                
                 try:
-                    print(f'[分析线程] 开始执行分析，audio_file_path={audio_file_path}')
-                    from modules.analysis_pipeline import analyze_audio
-                    from modules.realtime_transcriber import _save_meeting_to_db
-                    from app import app as flask_app
+                    audio_file_path = transcriber.save_audio_file()
+                    print(f'[停止转写] 音频文件保存: {audio_file_path}')
+                except Exception as e:
+                    print(f'[停止转写] 保存音频文件失败: {e}')
+                    audio_file_path = None
+                
+                try:
+                    result = transcriber.get_final_result()
+                    print(f'[停止转写] 最终转写结果: text长度={len(result.get("text", ""))}, segments={len(result.get("segments", []))}')
+                except Exception as e:
+                    print(f'[停止转写] 获取最终结果失败: {e}')
+                    result = {'text': '', 'segments': []}
 
-                    def progress_callback(percent, message):
-                        try:
-                            socketio.emit('realtime_analysis_progress', {
-                                'progress': percent,
-                                'message': message
-                            }, to=sid)
-                            print(f'[分析线程] 推送进度: {percent}% - {message}')
-                        except Exception as e:
-                            print(f'推送进度失败: {e}')
+                result['audio_file'] = audio_file_path
+                result['audio_duration'] = len(transcriber.all_audio_data) * 0.1
+                print(f'[停止转写] 音频时长: {result["audio_duration"]}')
 
-                    full_analysis = analyze_audio(
+                try:
+                    socketio.emit('transcription_stopped', {
+                        'audio_file': audio_file_path,
+                        'audio_duration': result['audio_duration'],
+                        'text': result.get('text', '')
+                    }, to=sid)
+                    print(f'[停止转写] 已发送 transcription_stopped 事件')
+                except Exception as e:
+                    print(f'[停止转写] 发送事件失败: {e}')
+
+                def _analyze_async():
+                    try:
+                        print(f'[分析线程] 开始执行分析，audio_file_path={audio_file_path}')
+                        from modules.analysis_pipeline import analyze_audio
+                        from modules.realtime_transcriber import _save_meeting_to_db
+                        from app import app as flask_app
+
+                        def progress_callback(percent, message):
+                            try:
+                                socketio.emit('realtime_analysis_progress', {
+                                    'progress': percent,
+                                    'message': message
+                                }, to=sid)
+                                print(f'[分析线程] 推送进度: {percent}% - {message}')
+                            except Exception as e:
+                                print(f'推送进度失败: {e}')
+
+                        full_analysis = analyze_audio(
                         audio_file_path,
                         language=transcriber.language,
                         knowledge_items=transcriber.knowledge_items,
                         score_weights=transcriber.score_weights,
-                        progress_callback=progress_callback
+                        progress_callback=progress_callback,
+                        transcription_text=result.get('text', '')
                     )
-                    print(f'[分析线程] 分析完成，full_analysis={full_analysis is not None}')
+                        print(f'[分析线程] 分析完成，full_analysis={full_analysis is not None}')
 
-                    if full_analysis:
-                        result.update(full_analysis)
-                        if 'compliance' in full_analysis and full_analysis['compliance']:
-                            result['compliance_report'] = full_analysis['compliance']
+                        if full_analysis:
+                            result.update(full_analysis)
+                            if 'compliance' in full_analysis and full_analysis['compliance']:
+                                result['compliance_report'] = full_analysis['compliance']
 
-                    if 'audio_duration' in result:
-                        result['duration'] = int(result['audio_duration'])
+                        if 'audio_duration' in result:
+                            result['duration'] = int(result['audio_duration'])
 
-                    with flask_app.app_context():
-                        meeting_id = _save_meeting_to_db(result, audio_file_path, transcriber.knowledge_items)
-                        print(f'[分析线程] 保存会议到数据库: meeting_id={meeting_id}')
-                    
-                    if meeting_id:
-                        result['meeting_id'] = meeting_id
-                        result['id'] = meeting_id
+                        with flask_app.app_context():
+                            meeting_id = _save_meeting_to_db(result, audio_file_path, transcriber.knowledge_items)
+                            print(f'[分析线程] 保存会议到数据库: meeting_id={meeting_id}')
+                        
+                        if meeting_id:
+                            result['meeting_id'] = meeting_id
+                            result['id'] = meeting_id
 
-                    socketio.emit('transcription_final', result, to=sid)
-                    print(f'[分析线程] 已发送 transcription_final 事件，meeting_id={meeting_id}')
+                        socketio.emit('transcription_final', result, to=sid)
+                        print(f'[分析线程] 已发送 transcription_final 事件，meeting_id={meeting_id}')
 
-                except Exception as e:
-                    print(f'Analysis thread error: {e}')
-                    import traceback
-                    traceback.print_exc()
-                    socketio.emit('realtime_analysis_progress', {
-                        'progress': -1,
-                        'message': f'分析失败: {str(e)}'
-                    }, to=sid)
-                finally:
-                    if sid in transcribers:
-                        del transcribers[sid]
+                    except Exception as e:
+                        print(f'Analysis thread error: {e}')
+                        import traceback
+                        traceback.print_exc()
+                        socketio.emit('realtime_analysis_progress', {
+                            'progress': -1,
+                            'message': f'分析失败: {str(e)}'
+                        }, to=sid)
+                    finally:
+                        if sid in transcribers:
+                            del transcribers[sid]
 
-            threading.Thread(target=_analyze_async, daemon=True).start()
-            print(f'Transcription stopped for session {sid}, analysis started in background')
-        else:
-            socketio.emit('error', {'message': '没有活跃的转写会话'}, to=sid)
+                threading.Thread(target=_analyze_async, daemon=True).start()
+                print(f'Transcription stopped for session {sid}, analysis started in background')
+            
+            else:
+                socketio.emit('error', {'message': '没有活跃的转写会话'}, to=sid)
+        except Exception as e:
+            print(f'[停止转写] 主流程异常: {e}')
+            import traceback
+            traceback.print_exc()

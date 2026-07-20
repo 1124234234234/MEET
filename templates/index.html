@@ -48,8 +48,8 @@
         .score-good { background: #e6f7ff; color: #1890ff; border: 1px solid #91d5ff; }
         .score-pass { background: #fffbe6; color: #faad14; border: 1px solid #ffe58f; }
         .score-fail { background: #fff1f0; color: #ff4d4f; border: 1px solid #ffccc7; }
-        .loading { display: none; text-align: center; padding: 40px; }
-        .loading.show { display: block; }
+        .loading { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); justify-content: center; align-items: center; z-index: 9999; }
+        .loading.show { display: flex; }
         .spinner { width: 40px; height: 40px; border: 3px solid #f3f3f3; border-top: 3px solid #667eea; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); justify-content: center; align-items: center; z-index: 1000; }
@@ -156,15 +156,17 @@
             </div>
 
             <div class="loading" id="loading">
-                <div class="spinner"></div>
-                <p>正在分析音频，请稍候...</p>
-                <div style="width:200px; margin-top:16px;">
-                    <div style="display:flex; justify-content:space-between; font-size:12px; color:#666; margin-bottom:4px;">
-                        <span id="analysis-progress-text">转写中...</span>
-                        <span id="analysis-progress-percent">0%</span>
-                    </div>
-                    <div style="height:4px; background:#e9ecef; border-radius:2px; overflow:hidden;">
-                        <div id="analysis-progress-bar" style="height:100%; background:#007bff; width:0%; transition:width 0.5s;"></div>
+                <div class="modal-content" style="background:white; border-radius:12px; padding:40px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,0.15);">
+                    <div class="spinner"></div>
+                    <p style="font-size:16px; color:#333; margin-top:20px;">正在分析音频，请稍候...</p>
+                    <div style="width:300px; margin-top:24px;">
+                        <div style="display:flex; justify-content:space-between; font-size:14px; color:#666; margin-bottom:8px;">
+                            <span id="analysis-progress-text">转写中...</span>
+                            <span id="analysis-progress-percent">0%</span>
+                        </div>
+                        <div style="height:6px; background:#e9ecef; border-radius:3px; overflow:hidden;">
+                            <div id="analysis-progress-bar" style="height:100%; background:#667eea; width:0%; transition:width 0.5s;"></div>
+                        </div>
                     </div>
                 </div>
             </div>

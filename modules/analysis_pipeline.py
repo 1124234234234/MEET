@@ -6,7 +6,7 @@ import os
 import time
 
 
-def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights=None, progress_callback=None):
+def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights=None, progress_callback=None, transcription_text=None):
     """
     对音频文件进行完整分析
     包括：音频预处理、说话人分离、关键词提取、主题分析、摘要生成、合规检查等
@@ -17,6 +17,7 @@ def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights
         knowledge_items: 知识库条目列表
         score_weights: 合规评分权重
         progress_callback: 进度回调函数，签名为 callback(percent, message)
+        transcription_text: 已有的转写文本，如果提供则跳过重新转写
 
     Returns:
         分析结果字典，失败返回None
@@ -53,21 +54,29 @@ def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights
 
         _update_progress(5, '正在初始化模型...')
 
-        from app import init_whisper_model, whisper_model
-        init_whisper_model()
+        if transcription_text:
+            print('[分析流水线] 使用已有的转写文本')
+            full_text = transcription_text
+            result = {'segments': [], 'language': language}
+            print(f'[分析流水线] 转写文本长度: {len(full_text)}')
+        else:
+            from app import init_whisper_model
+            init_whisper_model()
 
-        _update_progress(10, '正在转写音频...')
-        print(f'[分析流水线] 开始转写音频: {analysis_audio_path}')
-        _t1 = time.time()
+            from app import whisper_model
+            if whisper_model is None:
+                print('[分析流水线] Whisper模型未加载')
+                _update_progress(-1, '模型加载失败')
+                return None
 
-        if whisper_model is None:
-            print('[分析流水线] Whisper模型未加载')
-            _update_progress(-1, '模型加载失败')
-            return None
+            _update_progress(10, '正在转写音频...')
+            print(f'[分析流水线] 开始转写音频: {analysis_audio_path}')
+            _t1 = time.time()
 
-        result = transcribe_with_fix(whisper_model, analysis_audio_path, language=language)
-        full_text = result['text']
-        print(f'[分析流水线] 转写完成，耗时 {time.time()-_t1:.1f}s，文本长度: {len(full_text)}')
+            from modules.whisper_utils import transcribe_with_fix
+            result = transcribe_with_fix(whisper_model, analysis_audio_path, language=language)
+            full_text = result['text']
+            print(f'[分析流水线] 转写完成，耗时 {time.time()-_t1:.1f}s，文本长度: {len(full_text)}')
 
         _update_progress(40, '正在进行说话人分离...')
         speaker_segments = []
@@ -79,19 +88,28 @@ def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights
             print(f'说话人分离失败: {e}')
 
         transcriptions = []
-        for seg in result['segments']:
-            speaker = 'SPEAKER_00'
-            if speaker_segments:
-                for ss in speaker_segments:
-                    if ss['start'] <= seg['start'] <= ss['end']:
-                        speaker = ss['speaker']
-                        break
+        if result['segments']:
+            for seg in result['segments']:
+                speaker = 'SPEAKER_00'
+                if speaker_segments:
+                    for ss in speaker_segments:
+                        if ss['start'] <= seg['start'] <= ss['end']:
+                            speaker = ss['speaker']
+                            break
+                transcriptions.append({
+                    'speaker': speaker,
+                    'text': seg['text'],
+                    'start_time': seg['start'],
+                    'end_time': seg['end'],
+                    'confidence': seg.get('confidence', 0.0)
+                })
+        else:
             transcriptions.append({
-                'speaker': speaker,
-                'text': seg['text'],
-                'start_time': seg['start'],
-                'end_time': seg['end'],
-                'confidence': seg.get('confidence', 0.0)
+                'speaker': 'SPEAKER_00',
+                'text': full_text,
+                'start_time': 0,
+                'end_time': 0,
+                'confidence': 1.0
             })
 
         _update_progress(55, '正在提取关键词...')
