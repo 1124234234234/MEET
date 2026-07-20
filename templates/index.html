@@ -783,15 +783,51 @@
                     el.scrollTop = el.scrollHeight;
                 });
 
-                socket.on('transcription_final', (data) => {
+                socket.on('transcription_stopped', (data) => {
+                    console.log('Transcription stopped, starting analysis...');
                     document.getElementById('loading').classList.add('show');
+                    document.getElementById('analysis-progress-bar').style.width = '0%';
+                    document.getElementById('analysis-progress-text').textContent = '准备分析...';
+                    document.getElementById('analysis-progress-percent').textContent = '0%';
+                });
+
+                socket.on('realtime_analysis_progress', (data) => {
+                    console.log('Analysis progress:', data.progress + '%', data.message);
+                    document.getElementById('analysis-progress-bar').style.width = Math.max(0, data.progress) + '%';
+                    document.getElementById('analysis-progress-text').textContent = data.message;
+                    document.getElementById('analysis-progress-percent').textContent = Math.max(0, data.progress) + '%';
                     
-                    setTimeout(() => {
+                    if (data.progress < 0) {
+                        alert('分析失败: ' + data.message);
                         document.getElementById('loading').classList.remove('show');
-                        document.getElementById('result-section').style.display = 'block';
-                        renderResult(data);
-                        loadMeetingList();
-                    }, 500);
+                        
+                        document.getElementById('realtime-start-btn').disabled = false;
+                        document.getElementById('realtime-stop-btn').disabled = true;
+                        document.getElementById('realtime-status').textContent = '未连接';
+                        document.getElementById('realtime-status').style.color = '#999';
+                        
+                        if (socket) {
+                            socket.disconnect();
+                            socket = null;
+                        }
+                    }
+                });
+
+                socket.on('transcription_final', (data) => {
+                    document.getElementById('loading').classList.remove('show');
+                    document.getElementById('result-section').style.display = 'block';
+                    renderResult(data);
+                    loadMeetingList();
+                    
+                    document.getElementById('realtime-start-btn').disabled = false;
+                    document.getElementById('realtime-stop-btn').disabled = true;
+                    document.getElementById('realtime-status').textContent = '未连接';
+                    document.getElementById('realtime-status').style.color = '#999';
+                    
+                    if (socket) {
+                        socket.disconnect();
+                        socket = null;
+                    }
                 });
 
                 socket.on('error', (data) => {
@@ -856,14 +892,12 @@
             }
             if (socket) {
                 socket.emit('stop_transcription');
-                socket.disconnect();
-                socket = null;
             }
 
-            document.getElementById('realtime-start-btn').disabled = false;
+            document.getElementById('realtime-start-btn').disabled = true;
             document.getElementById('realtime-stop-btn').disabled = true;
-            document.getElementById('realtime-status').textContent = '未连接';
-            document.getElementById('realtime-status').style.color = '#999';
+            document.getElementById('realtime-status').textContent = '分析中...';
+            document.getElementById('realtime-status').style.color = '#faad14';
             document.getElementById('recording-indicator').style.display = 'none';
         }
 

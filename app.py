@@ -28,7 +28,7 @@ from modules.audio_preprocessor import preprocess_audio, format_time, detect_spe
 from modules.speaker_diarization import speaker_diarization_simple
 from modules.text_analyzer import extract_keywords, analyze_topic, generate_summary, analyze_sentiment
 from modules.compliance_checker import calculate_compliance_score, generate_compliance_report, get_score_level
-from modules.realtime_transcriber import register_socketio_events
+from modules.funasr_transcriber import register_socketio_events
 from modules.meeting_detector import MeetingDetector, count_participants, analyze_participation_distribution
 from modules.report_generator import generate_meeting_summary_report, generate_compliance_trend_report, generate_report_html
 
@@ -853,7 +853,6 @@ with app.app_context():
 
 if __name__ == '__main__':
     init_whisper_model()          # 加载 medium 用于上传分析
-    init_whisper_model_realtime() # 加载 small 用于实时转写
-    register_socketio_events(socketio, whisper_model_realtime)
+    register_socketio_events(socketio)
     print(f'\nReady to accept requests on 0.0.0.0:5000')
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
