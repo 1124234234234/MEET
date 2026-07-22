@@ -772,6 +772,129 @@ def get_meeting_status_detection():
     except Exception as e:
         return jsonify({'code': 500, 'message': f'检测失败: {str(e)}'}), 500
 
+@app.route('/api/v1/transcribe', methods=['POST'])
+def api_transcribe():
+    """
+    语音转写API接口
+    供第三方软件调用，上传音频文件进行转写和分析
+    
+    请求方式: POST
+    Content-Type: multipart/form-data 或 application/json
+    
+    参数:
+        audio (file): 音频文件，支持 mp3, wav, m4a 格式
+        audio_base64 (string): Base64编码的音频数据（二选一）
+        language (string): 语言，默认 'zh'（中文）
+        enable_compliance (boolean): 是否进行合规检查，默认 true
+        enable_diarization (boolean): 是否进行说话人分离，默认 true
+    
+    返回:
+        {
+            "code": 200,
+            "message": "成功",
+            "data": {
+                "text": "转写文本内容",
+                "segments": [...],
+                "keywords": [...],
+                "topics": [...],
+                "summary": "会议摘要",
+                "sentiment": {...},
+                "compliance_report": {...},
+                "speaker_segments": [...]
+            }
+        }
+    """
+    try:
+        import base64
+        from modules.analysis_pipeline import analyze_audio
+        
+        audio_file = request.files.get('audio')
+        audio_base64 = request.form.get('audio_base64') or request.json.get('audio_base64') if request.is_json else None
+        
+        if not audio_file and not audio_base64:
+            return jsonify({
+                'code': 400,
+                'message': '请提供音频文件或Base64编码的音频数据'
+            }), 400
+        
+        upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+        os.makedirs(upload_folder, exist_ok=True)
+        
+        file_id = str(uuid.uuid4())
+        
+        if audio_file:
+            filename = audio_file.filename
+            ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else 'wav'
+            audio_path = os.path.join(upload_folder, f'{file_id}.{ext}')
+            audio_file.save(audio_path)
+        else:
+            audio_bytes = base64.b64decode(audio_base64)
+            audio_path = os.path.join(upload_folder, f'{file_id}.wav')
+            with open(audio_path, 'wb') as f:
+                f.write(audio_bytes)
+        
+        language = request.form.get('language', 'zh') or (request.json.get('language', 'zh') if request.is_json else 'zh')
+        enable_compliance = request.form.get('enable_compliance', 'true').lower() == 'true' if not request.is_json else request.json.get('enable_compliance', True)
+        enable_diarization = request.form.get('enable_diarization', 'true').lower() == 'true' if not request.is_json else request.json.get('enable_diarization', True)
+        
+        knowledge_items = []
+        score_weights = None
+        if enable_compliance:
+            knowledge_items = KnowledgeBase.query.filter_by(status='active').all()
+            db_weights = ScoreWeight.query.all()
+            if db_weights:
+                score_weights = {w.weight_name: w.weight_value for w in db_weights}
+            else:
+                score_weights = app.config.get('SCORE_WEIGHTS')
+        
+        def progress_callback(percent, message):
+            print(f'[API转写] {percent}% - {message}')
+        
+        result = analyze_audio(
+            audio_path,
+            language=language,
+            knowledge_items=knowledge_items,
+            score_weights=score_weights,
+            progress_callback=progress_callback
+        )
+        
+        if result:
+            return jsonify({
+                'code': 200,
+                'message': '成功',
+                'data': result
+            })
+        else:
+            return jsonify({
+                'code': 500,
+                'message': '转写分析失败'
+            }), 500
+            
+    except Exception as e:
+        print(f'API转写错误: {e}')
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'code': 500,
+            'message': f'转写失败: {str(e)}'
+        }), 500
+
+
+@app.route('/api/v1/health', methods=['GET'])
+def api_health():
+    """
+    健康检查接口
+    """
+    return jsonify({
+        'code': 200,
+        'message': '服务正常运行',
+        'data': {
+            'timestamp': datetime.now().isoformat(),
+            'version': '1.0.0'
+        }
+    })
+
+
 with app.app_context():
     db.create_all()
     
