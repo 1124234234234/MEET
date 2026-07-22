@@ -6,7 +6,7 @@ import os
 import time
 
 
-def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights=None, progress_callback=None, transcription_text=None):
+def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights=None, progress_callback=None, transcription_text=None, transcriptions=None):
     """
     对音频文件进行完整分析
     包括：音频预处理、说话人分离、关键词提取、主题分析、摘要生成、合规检查等
@@ -57,7 +57,16 @@ def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights
         if transcription_text:
             print('[分析流水线] 使用已有的转写文本')
             full_text = transcription_text
-            result = {'segments': [], 'language': language}
+            if transcriptions:
+                print(f'[分析流水线] 使用已有的分段信息，共{len(transcriptions)}段')
+            else:
+                transcriptions = [{
+                    'speaker': 'SPEAKER_00',
+                    'text': full_text,
+                    'start_time': 0,
+                    'end_time': 0,
+                    'confidence': 1.0
+                }]
             print(f'[分析流水线] 转写文本长度: {len(full_text)}')
         else:
             from app import init_whisper_model
@@ -87,30 +96,14 @@ def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights
         except Exception as e:
             print(f'说话人分离失败: {e}')
 
-        transcriptions = []
-        if result['segments']:
-            for seg in result['segments']:
+        if speaker_segments and 'segments' in locals():
+            for seg in transcriptions:
                 speaker = 'SPEAKER_00'
-                if speaker_segments:
-                    for ss in speaker_segments:
-                        if ss['start'] <= seg['start'] <= ss['end']:
-                            speaker = ss['speaker']
-                            break
-                transcriptions.append({
-                    'speaker': speaker,
-                    'text': seg['text'],
-                    'start_time': seg['start'],
-                    'end_time': seg['end'],
-                    'confidence': seg.get('confidence', 0.0)
-                })
-        else:
-            transcriptions.append({
-                'speaker': 'SPEAKER_00',
-                'text': full_text,
-                'start_time': 0,
-                'end_time': 0,
-                'confidence': 1.0
-            })
+                for ss in speaker_segments:
+                    if ss['start'] <= seg['start_time'] <= ss['end']:
+                        speaker = ss['speaker']
+                        break
+                seg['speaker'] = speaker
 
         _update_progress(55, '正在提取关键词...')
         _t3 = time.time()
@@ -163,7 +156,7 @@ def analyze_audio(audio_path, language='zh', knowledge_items=None, score_weights
             'summary': summary,
             'sentiment': sentiment,
             'audio_quality': audio_quality,
-            'compliance': compliance_result,
+            'compliance_report': compliance_result,
             'speaker_segments': speaker_segments
         }
 

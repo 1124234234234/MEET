@@ -10,9 +10,109 @@ import uuid
 import tempfile
 import numpy as np
 import soundfile as sf
+import re
 from flask import current_app
 
+def _clean_transcription_text(text):
+    """清理转写文本：去除空格、添加标点符号、优化分句"""
+    if not text:
+        return text
+    
+    text = text.strip()
+    
+    text = text.replace(' ', '').replace('\u3000', '').replace('\xa0', '')
+    
+    comma_before_words = [
+        '并且', '而且', '但是', '不过', '然而', '可是', '却', '反而', '倒是',
+        '因此', '所以', '因而', '于是', '从而', '以致',
+        '因为', '由于', '既然', '要是', '如果', '假如', '倘若', '万一', '除非',
+        '虽然', '尽管', '即使', '哪怕', '纵然',
+        '只要', '只有', '无论', '不管', '不论',
+        '不仅', '不但', '不光', '不只',
+        '还是', '或是', '或者',
+        '以及', '及', '与', '和', '跟',
+        '另外', '此外', '再者', '还有', '同时', '另外还有',
+        '第一', '第二', '第三', '第四', '第五', '首先', '其次', '最后', '再次',
+        '那么', '这么', '那样', '这样',
+        '其实', '事实上', '实际上', '本质上',
+        '简单来说', '总而言之', '总的来说', '概括地说',
+        '例如', '比如', '比如说', '举例来说',
+        '特别是', '尤其是', '值得注意的是',
+        '也就是说', '换句话说', '具体而言',
+        '一方面', '另一方面',
+        '综上所述', '由此可见', '据此',
+        '我们认为', '我们觉得', '我们建议', '我们决定', '我们需要',
+        '会议认为', '会议决定', '会议建议',
+        '有观点认为', '有观点提出',
+    ]
+    
+    for word in comma_before_words:
+        text = text.replace(word, '，' + word)
+    
+    comma_after_words = [
+        '的话', '之后', '之前', '以来', '以来的',
+        '今天', '明天', '昨天', '前天', '后天',
+        '现在', '刚才', '刚刚', '之前', '以后',
+        '目前', '当前', '近来', '最近',
+        '同时', '与此同时', '一起', '一同',
+        '总之', '总而言之', '总之来说',
+        '最后', '最终', '终于',
+        '结果', '结论', '因此',
+        '首先', '其次', '再次', '最后',
+        '第一', '第二', '第三',
+        '例如', '比如',
+        '事实上', '实际上', '其实',
+        '另外', '此外',
+        '不过', '但是', '然而',
+        '因此', '所以',
+    ]
+    
+    for word in comma_after_words:
+        text = text.replace(word, word + '，')
+    
+    text = re.sub(r'([。！？])\s*，', r'\1', text)
+    text = re.sub(r'，，+', '，', text)
+    
+    sentence_end_chars = ['吗', '呢', '吧', '啊', '呀', '嘛', '咯', '哦', '嘿', '诶', '哼', '嗯', '哈']
+    for char in sentence_end_chars:
+        text = text.replace(char + '？', char + '？')
+        if char + '？' not in text:
+            text = text.replace(char, char + '？')
+    
+    period_before_chars = ['了', '的', '吧', '呢', '吗', '啊', '呀', '嘛']
+    for char in period_before_chars:
+        pattern = re.compile(re.escape(char) + r'(?=[\u4e00-\u9fa5])')
+        text = pattern.sub(char + '。', text)
+    
+    text = re.sub(r'([。！？])+', r'\1', text)
+    
+    if text and text[-1] not in ['。', '！', '？']:
+        text += '。'
+    
+    text = re.sub(r'([。！？])([^\n])', r'\1\n\2', text)
+    
+    return text.strip()
+
 transcribers = {}
+funasr_model = None
+
+
+def init_funasr_model():
+    """预加载FunASR模型（全局单例）"""
+    global funasr_model
+    if funasr_model is None:
+        try:
+            from funasr import AutoModel
+            print('[FunASR] 开始预加载模型...')
+            funasr_model = AutoModel(
+                model="paraformer-zh",
+                vad_model="fsmn-vad",
+                vad_kwargs={"max_single_segment_time": 30000}
+            )
+            print('[FunASR] 模型预加载成功')
+        except Exception as e:
+            print(f'[FunASR] 模型预加载失败: {e}')
+    return funasr_model
 
 
 class FunASRRealtimeTranscriber:
@@ -25,12 +125,12 @@ class FunASRRealtimeTranscriber:
         self.score_weights = score_weights or None
         self.buffer = []
         self.sr = 16000
-        self.chunk_duration = 5.0
+        self.chunk_duration = 2.0
         self.chunk_samples = int(self.sr * self.chunk_duration)
-        self.max_buffer_duration = 10.0
+        self.max_buffer_duration = 8.0
         self.max_buffer_samples = int(self.sr * self.max_buffer_duration)
-        self.silence_threshold = 0.01
-        self.silence_duration = 0.5
+        self.silence_threshold = 0.015
+        self.silence_duration = 0.3
         self.silence_samples = int(self.sr * self.silence_duration)
         self.silence_count = 0
         self.is_speaking = False
@@ -40,21 +140,11 @@ class FunASRRealtimeTranscriber:
         self.audio_file_path = audio_file_path
         self.all_audio_data = []
         
-        self.model = None
-        self._load_model()
-
-    def _load_model(self):
-        """加载FunASR模型"""
-        try:
-            from funasr import AutoModel
-            self.model = AutoModel(
-                model="paraformer-zh",
-                vad_model="fsmn-vad",
-                vad_kwargs={"max_single_segment_time": 30000}
-            )
-            print('[FunASR] 模型加载成功')
-        except Exception as e:
-            print(f'[FunASR] 模型加载失败: {e}')
+        self.model = funasr_model
+        if self.model is None:
+            print('[FunASR] 警告：模型未预加载，尝试实时加载')
+            init_funasr_model()
+            self.model = funasr_model
 
     def add_audio_chunk(self, audio_data):
         """
@@ -127,6 +217,7 @@ class FunASRRealtimeTranscriber:
 
             if result and len(result) > 0:
                 text = result[0]['text'].strip()
+                text = _clean_transcription_text(text)
                 if text:
                     segments = [{
                         'text': text,
@@ -179,13 +270,25 @@ class FunASRRealtimeTranscriber:
         else:
             result = None
             
-        full_text = ' '.join([seg['text'] for seg in self.transcription_history])
+        full_text = ''.join([seg['text'] for seg in self.transcription_history])
         if result:
-            full_text += ' ' + result['text']
+            full_text += result['text']
+
+        # 构建 transcriptions 列表供前端分段显示
+        transcriptions = []
+        for seg in self.transcription_history:
+            transcriptions.append({
+                'speaker': 'SPEAKER_00',
+                'text': seg['text'],
+                'start_time': seg['start_time'],
+                'end_time': seg['end_time'],
+                'confidence': seg.get('confidence', 1.0)
+            })
 
         return {
             'text': full_text.strip(),
             'segments': self.transcription_history.copy(),
+            'transcriptions': transcriptions,
             'is_final': True
         }
 
@@ -336,7 +439,8 @@ def register_socketio_events(socketio):
                         knowledge_items=transcriber.knowledge_items,
                         score_weights=transcriber.score_weights,
                         progress_callback=progress_callback,
-                        transcription_text=result.get('text', '')
+                        transcription_text=result.get('text', ''),
+                        transcriptions=result.get('transcriptions', [])
                     )
                         print(f'[分析线程] 分析完成，full_analysis={full_analysis is not None}')
 

@@ -96,11 +96,12 @@ def _qwen_summarize(text, max_length=300):
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_length,
-                temperature=0.3,
-                top_p=0.8,
-                do_sample=False,
-                num_beams=1,
+                temperature=0.7,
+                top_p=0.9,
+                do_sample=True,
+                num_beams=3,
                 pad_token_id=tokenizer.eos_token_id,
+                repetition_penalty=1.1,
             )
 
         result = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
@@ -418,31 +419,62 @@ def _smart_segment(text):
     if not text:
         return []
     
-    raw_sentences = re.split(r'[。！？!?\n]', text)
+    text = text.replace('\n', '。')
+    
+    raw_sentences = re.split(r'[。！？!?]', text)
     raw_sentences = [s.strip() for s in raw_sentences if s.strip() and len(s.strip()) > 5]
     
-    if len(raw_sentences) >= 8:
+    if len(raw_sentences) >= 5:
+        return raw_sentences
+    
+    raw_sentences = re.split(r'[。！？!?；;]', text)
+    raw_sentences = [s.strip() for s in raw_sentences if s.strip() and len(s.strip()) > 5]
+    
+    if len(raw_sentences) >= 5:
+        return raw_sentences
+    
+    raw_sentences = re.split(r'[。！？!?；;，,]', text)
+    raw_sentences = [s.strip() for s in raw_sentences if s.strip() and len(s.strip()) > 5]
+    
+    if len(raw_sentences) >= 5:
         return raw_sentences
     
     sentence_break_words = [
-        '我认为', '我觉得', '我建议', '我同意', '我强调', '我补充',
-        '另外，', '另外', '还有，', '还有', '对了，', '对了',
-        '而且', '但是', '不过', '所以', '因此',
-        '第一，', '第一', '第二，', '第二', '第三，', '第三',
-        '第四，', '第四', '第五，', '第五',
-        '首先', '其次', '最后',
-        '这款', '这个产品', '那这个',
-        '好的，', '好的',
-        '必须', '要求', '禁止', '需要', '建议', '决定',
-        '会议', '讨论', '总结',
-        '今天我们', '今天',
-        '我们禁止', '我们必须', '我们要求', '我们决定', '我们建议',
-        '提醒客户', '提醒大家',
+        '我认为', '我觉得', '我建议', '我同意', '我强调', '我补充', '我指出', '我提出',
+        '我想', '我打算', '我计划', '我准备', '我希望', '我要求', '我需要', '我必须',
+        '另外，', '另外', '还有，', '还有', '对了，', '对了', '除此之外', '除此以外',
+        '而且', '但是', '不过', '所以', '因此', '然而', '可是', '却', '反而',
+        '第一，', '第一', '第二，', '第二', '第三，', '第三', '第四，', '第四', '第五，', '第五',
+        '首先', '其次', '最后', '再次', '最后但并非最不重要',
+        '好的，', '好的', '是的，', '是的', '明白，', '明白', '知道了，', '知道了',
+        '必须', '要求', '禁止', '需要', '建议', '决定', '同意', '反对', '批准',
+        '会议认为', '会议决定', '会议建议', '会议同意', '会议要求',
+        '有观点认为', '有观点提出', '有人认为', '有人提出',
+        '值得注意的是', '特别需要强调的是', '需要特别指出的是',
+        '总而言之', '总的来说', '概括地说', '简单来说',
+        '例如', '比如', '比如说', '举例来说', '正如',
+        '也就是说', '换句话说', '具体而言', '更具体地说',
+        '一方面', '另一方面', '从一方面来看', '从另一方面来看',
+        '综上所述', '由此可见', '据此', '基于此',
+        '事实上', '实际上', '其实', '本质上',
+        '特别是', '尤其是', '更重要的是', '关键在于',
+        '今天我们', '今天', '本周', '本月', '今年',
+        '我们必须', '我们要求', '我们决定', '我们建议', '我们需要',
+        '提醒客户', '提醒大家', '提醒各位',
+        '公司', '产品', '项目', '市场', '业务', '技术',
+        '发展', '合作', '创新', '管理', '服务', '质量',
+        '风险', '合规', '规定', '制度', '政策', '规范',
+        '销售', '客户', '市场', '竞争', '价格', '成本',
+        '进度', '计划', '安排', '部署', '目标', '任务',
+        '问题', '困难', '解决', '处理', '应对', '优化',
+        '讨论', '分析', '研究', '评估', '检查', '审核',
+        '汇报', '总结', '报告', '进展', '成果', '完成',
+        '启动', '推进', '落实', '执行', '实施', '开展',
     ]
-    
+
     result = []
     for sent in raw_sentences:
-        if len(sent) < 40:
+        if len(sent) < 50:
             result.append(sent)
             continue
         
@@ -450,7 +482,7 @@ def _smart_segment(text):
         for word in sentence_break_words:
             new_parts = []
             for part in sub_parts:
-                if len(part) < 40:
+                if len(part) < 50:
                     new_parts.append(part)
                     continue
                 split_parts = re.split(f'(?={re.escape(word)})', part)
@@ -461,9 +493,35 @@ def _smart_segment(text):
             part = part.strip('，,、；; ')
             if len(part) > 8:
                 result.append(part)
-    
+
     result = [s for s in result if len(s) > 10]
-    return result if result else raw_sentences
+    
+    if len(result) < 3 and len(text) > 100:
+        chunk_size = min(120, max(60, len(text) // 5))
+        result = []
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i:i+chunk_size].strip()
+            if len(chunk) > 10:
+                last_comma = chunk.rfind('，')
+                last_period = chunk.rfind('。')
+                
+                best_split = -1
+                if last_period > len(chunk) * 0.3:
+                    best_split = last_period
+                elif last_comma > len(chunk) * 0.3:
+                    best_split = last_comma
+                
+                if best_split > 20:
+                    result.append(chunk[:best_split + 1].strip())
+                    remaining = chunk[best_split + 1:].strip()
+                    if remaining:
+                        result.append(remaining)
+                else:
+                    result.append(chunk)
+    
+    result = [s for s in result if len(s) > 8]
+    
+    return result if result else [text]
 
 
 def extract_key_sentences_from_list(sentences, top_n=5):

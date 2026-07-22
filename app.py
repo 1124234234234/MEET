@@ -853,6 +853,10 @@ with app.app_context():
 
 if __name__ == '__main__':
     init_whisper_model()          # 加载 medium 用于上传分析
+    
+    from modules.funasr_transcriber import init_funasr_model
+    init_funasr_model()           # 预加载FunASR用于实时转写
+    
     register_socketio_events(socketio)
     print(f'\nReady to accept requests on 0.0.0.0:5000')
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
