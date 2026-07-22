@@ -583,7 +583,7 @@ def _save_meeting_to_db(result, audio_file_path, knowledge_items):
             db.session.commit()
 
         # 保存合规报告
-        compliance = result.get('compliance')
+        compliance = result.get('compliance') or result.get('compliance_report')
         if compliance:
             report = ComplianceReport(
                 meeting_id=meeting.id,

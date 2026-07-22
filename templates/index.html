@@ -956,7 +956,7 @@
         }
 
         async function loadMeetingList() {
-            const response = await fetch(`${API_BASE}/meetings`);
+            const response = await fetch(`${API_BASE}/meetings?page_size=100`);
             const result = await response.json();
             
             const tbody = document.getElementById('meeting-list');
