@@ -2,6 +2,10 @@ import os
 import json
 import uuid
 import threading
+import numpy as np
+import soundfile as sf
+from scipy.signal import resample_poly
+from math import gcd
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
@@ -10,6 +14,48 @@ import whisper
 import ssl
 
 ssl._create_default_https_context = ssl._create_unverified_context
+
+
+def _resample_audio(y, orig_sr, target_sr):
+    """用 scipy 重采样，避免 librosa 的 numba 问题"""
+    if orig_sr == target_sr:
+        return y
+    g = gcd(int(orig_sr), int(target_sr))
+    up = int(target_sr // g)
+    down = int(orig_sr // g)
+    return resample_poly(y, up, down).astype(np.float32)
+
+
+def _load_audio_soundfile(file, sr=16000):
+    """加载音频：soundfile 直接读，读不了的格式用 imageio-ffmpeg"""
+    try:
+        y, orig_sr = sf.read(file, always_2d=False, dtype='float32')
+        if y.ndim > 1:
+            y = y.mean(axis=1)
+        y = y.astype(np.float32)
+        if orig_sr != sr:
+            y = _resample_audio(y, orig_sr, sr)
+        return y
+    except Exception:
+        try:
+            import imageio_ffmpeg
+            import subprocess
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            cmd = [
+                ffmpeg_exe, '-nostdin', '-threads', '0',
+                '-i', file, '-f', 's16le', '-ac', '1',
+                '-acodec', 'pcm_s16le', '-ar', str(sr), '-'
+            ]
+            result = subprocess.run(cmd, capture_output=True, check=True)
+            audio_data = np.frombuffer(result.stdout, dtype=np.int16)
+            return audio_data.astype(np.float32) / 32768.0
+        except Exception as e:
+            raise RuntimeError(f"无法加载音频文件: {e}")
+
+
+import whisper.audio
+whisper.audio.load_audio = _load_audio_soundfile
+
 
 app = Flask(__name__)
 app.config.from_object('config.Config')

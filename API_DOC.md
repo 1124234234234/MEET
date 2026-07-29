@@ -1,162 +1,43 @@
-# 语音转写分析系统 API 接口文档
-
-## 概述
-
-本系统提供语音转写和会议分析的 RESTful API 接口，供第三方软件调用。第三方软件可将音频数据发送到接口，系统完成语音转写、说话人分离、合规检查等处理后返回结果。
+# 会议室智能合规分析系统 - API接口文档
 
 ## 基础信息
 
 - **服务地址**: `http://localhost:5000`
-- **API版本**: v1
-- **Content-Type**: `multipart/form-data` 或 `application/json`
-- **字符编码**: UTF-8
+- **版本**: v1.0.0
+- **编码**: UTF-8
+- **跨域**: 已启用CORS，支持所有域名
 
 ---
 
-## 接口列表
+## 目录
 
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/api/v1/transcribe` | POST | 语音转写与分析（核心接口） |
-| `/api/v1/health` | GET | 健康检查 |
-
----
-
-## 1. 语音转写与分析接口
-
-### 请求
-
-**URL**: `POST /api/v1/transcribe`
-
-**方式一：multipart/form-data（推荐上传文件）**
-
-```bash
-curl -X POST http://localhost:5000/api/v1/transcribe \
-  -F "audio=@meeting.mp3" \
-  -F "language=zh" \
-  -F "enable_compliance=true" \
-  -F "enable_diarization=true"
-```
-
-**方式二：application/json（Base64编码）**
-
-```bash
-curl -X POST http://localhost:5000/api/v1/transcribe \
-  -H "Content-Type: application/json" \
-  -d '{
-    "audio_base64": "base64_encoded_audio_data",
-    "language": "zh",
-    "enable_compliance": true,
-    "enable_diarization": true
-  }'
-```
-
-### 请求参数
-
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| audio | File | 否（与audio_base64二选一） | - | 音频文件，支持 mp3、wav、m4a 格式 |
-| audio_base64 | String | 否（与audio二选一） | - | Base64编码的音频数据 |
-| language | String | 否 | zh | 语言，支持 `zh`（中文）、`en`（英文） |
-| enable_compliance | Boolean | 否 | true | 是否进行合规检查 |
-| enable_diarization | Boolean | 否 | true | 是否进行说话人分离 |
-
-### 成功响应
-
-**HTTP状态码**: 200
-
-```json
-{
-    "code": 200,
-    "message": "成功",
-    "data": {
-        "text": "各位同事大家好，今天我们召开理财产品销售合规培训会议...",
-        "transcriptions": [
-            {
-                "speaker": "SPEAKER_00",
-                "text": "各位同事大家好",
-                "start_time": 0.0,
-                "end_time": 2.5,
-                "confidence": 0.98
-            }
-        ],
-        "keywords": ["合规", "理财产品", "销售", "培训"],
-        "topics": [
-            {"topic": "合规培训", "weight": 0.85},
-            {"topic": "产品销售", "weight": 0.72}
-        ],
-        "summary": "本次会议主要讨论理财产品销售的合规要求，包括风险告知、投资者适当性管理等内容。",
-        "sentiment": {
-            "positive": 0.75,
-            "negative": 0.05,
-            "neutral": 0.20,
-            "overall": "positive"
-        },
-        "compliance_report": {
-            "total_score": 92.5,
-            "score_level": "优秀",
-            "components": {
-                "risk_keywords": 100,
-                "required_points": 85,
-                "sentiment": 95
-            },
-            "missing_points": [],
-            "risk_keywords_found": [],
-            "matched_keywords": ["合规", "风险告知"],
-            "suggestions": ["会议内容合规，继续保持"]
-        },
-        "speaker_segments": [
-            {
-                "speaker": "SPEAKER_00",
-                "start": 0.0,
-                "end": 15.3,
-                "text": "..."
-            }
-        ]
-    }
-}
-```
-
-### 失败响应
-
-**HTTP状态码**: 400 / 500
-
-```json
-{
-    "code": 400,
-    "message": "请提供音频文件或Base64编码的音频数据"
-}
-```
-
-```json
-{
-    "code": 500,
-    "message": "转写失败: 具体错误信息"
-}
-```
+1. [健康检查](#1-健康检查)
+2. [语音转写分析](#2-语音转写分析)
+3. [会议管理](#3-会议管理)
+4. [知识库管理](#4-知识库管理)
+5. [合规检查](#5-合规检查)
+6. [评分权重](#6-评分权重)
+7. [系统配置](#7-系统配置)
+8. [报告生成](#8-报告生成)
 
 ---
 
-## 2. 健康检查接口
+## 1. 健康检查
 
-### 请求
+### 1.1 检查服务状态
 
-**URL**: `GET /api/v1/health`
-
-```bash
-curl http://localhost:5000/api/v1/health
+**请求**:
+```
+GET /api/v1/health
 ```
 
-### 成功响应
-
-**HTTP状态码**: 200
-
+**响应**:
 ```json
 {
     "code": 200,
     "message": "服务正常运行",
     "data": {
-        "timestamp": "2026-07-22T20:30:00",
+        "timestamp": "2026-07-23T10:00:00",
         "version": "1.0.0"
     }
 }
@@ -164,76 +45,596 @@ curl http://localhost:5000/api/v1/health
 
 ---
 
-## 响应字段说明
+## 2. 语音转写分析
 
-### data.text
+### 2.1 音频转写与分析（核心接口）
 
-完整的转写文本内容。
+**请求**:
+```
+POST /api/v1/transcribe
+```
 
-### data.transcriptions
+**Content-Type**: `multipart/form-data` 或 `application/json`
 
-转写分段列表，每段包含：
+**参数**:
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| speaker | String | 说话人标识（如 SPEAKER_00） |
-| text | String | 该段文本内容 |
-| start_time | Float | 开始时间（秒） |
-| end_time | Float | 结束时间（秒） |
-| confidence | Float | 置信度（0-1） |
+| 参数名 | 类型 | 必填 | 默认值 | 说明 |
+|--------|------|------|--------|------|
+| audio | File | 二选一 | - | 音频文件，支持 mp3, wav, m4a, ogg, flac |
+| audio_base64 | String | 二选一 | - | Base64编码的音频数据 |
+| language | String | 否 | zh | 语言，支持 zh（中文）、en（英文） |
+| enable_compliance | Boolean | 否 | true | 是否进行合规检查 |
+| enable_diarization | Boolean | 否 | true | 是否进行说话人分离 |
 
-### data.keywords
+**示例（curl）**:
+```bash
+# 文件上传方式
+curl -X POST http://localhost:5000/api/v1/transcribe \
+  -F "audio=@meeting.mp3" \
+  -F "language=zh" \
+  -F "enable_compliance=true"
 
-提取的关键词列表。
+# Base64方式
+curl -X POST http://localhost:5000/api/v1/transcribe \
+  -H "Content-Type: application/json" \
+  -d '{
+    "audio_base64": "base64_encoded_audio_data",
+    "language": "zh",
+    "enable_compliance": true
+  }'
+```
 
-### data.topics
+**示例（Python）**:
+```python
+import requests
 
-主题分析结果，每项包含：
+# 文件上传
+response = requests.post(
+    'http://localhost:5000/api/v1/transcribe',
+    files={'audio': open('meeting.mp3', 'rb')},
+    data={'language': 'zh', 'enable_compliance': 'true'}
+)
+print(response.json())
+```
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| topic | String | 主题名称 |
-| weight | Float | 权重（0-1） |
+**成功响应** (code=200):
+```json
+{
+    "code": 200,
+    "message": "成功",
+    "data": {
+        "text": "会议完整转写文本内容...",
+        "segments": [
+            {
+                "id": 0,
+                "start": 0.0,
+                "end": 5.2,
+                "text": "第一段转写内容",
+                "speaker": "Speaker 1"
+            }
+        ],
+        "keywords": ["关键词1", "关键词2", "关键词3"],
+        "topics": [
+            {"name": "工作汇报", "score": 0.85},
+            {"name": "项目讨论", "score": 0.32}
+        ],
+        "summary": "会议摘要内容...",
+        "sentiment": {
+            "positive": 0.75,
+            "neutral": 0.20,
+            "negative": 0.05,
+            "overall": "积极"
+        },
+        "compliance_report": {
+            "score": 92.5,
+            "level": "优秀",
+            "missing_points": [],
+            "risk_content": [],
+            "suggestions": []
+        },
+        "speaker_segments": [
+            {
+                "speaker": "Speaker 1",
+                "start": 0.0,
+                "end": 10.5,
+                "text": "说话人1的发言内容"
+            }
+        ]
+    }
+}
+```
 
-### data.summary
+**失败响应** (code=400):
+```json
+{
+    "code": 400,
+    "message": "请提供音频文件或Base64编码的音频数据"
+}
+```
 
-会议摘要文本。
+---
 
-### data.sentiment
+## 3. 会议管理
 
-情绪分析结果：
+### 3.1 获取会议列表
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| positive | Float | 正面情绪占比 |
-| negative | Float | 负面情绪占比 |
-| neutral | Float | 中性情绪占比 |
-| overall | String | 总体情绪（positive/negative/neutral） |
+**请求**:
+```
+GET /api/meetings
+```
 
-### data.compliance_report
+**参数**:
 
-合规检查报告：
+| 参数名 | 类型 | 必填 | 默认值 | 说明 |
+|--------|------|------|--------|------|
+| page | Integer | 否 | 1 | 页码 |
+| per_page | Integer | 否 | 20 | 每页数量 |
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| total_score | Float | 综合合规评分（0-100） |
-| score_level | String | 评分等级（优秀/合格/不合格） |
-| components | Object | 各维度得分 |
-| missing_points | Array | 遗漏的合规要点 |
-| risk_keywords_found | Array | 发现的风险关键词 |
-| matched_keywords | Array | 匹配的合规关键词 |
-| suggestions | Array | 改进建议 |
+**响应**:
+```json
+{
+    "code": 200,
+    "data": {
+        "meetings": [
+            {
+                "id": 1,
+                "title": "未命名会议",
+                "date": "2026-07-23T10:00:00",
+                "duration": 300,
+                "status": "completed",
+                "compliance_score": 92.5,
+                "transcription_count": 15
+            }
+        ],
+        "total": 100,
+        "page": 1,
+        "per_page": 20
+    }
+}
+```
 
-### data.speaker_segments
+### 3.2 获取单个会议详情
 
-说话人分离结果：
+**请求**:
+```
+GET /api/meetings/{meeting_id}
+```
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| speaker | String | 说话人标识 |
-| start | Float | 开始时间（秒） |
-| end | Float | 结束时间（秒） |
-| text | String | 该说话人所说内容 |
+**响应**:
+```json
+{
+    "code": 200,
+    "data": {
+        "id": 1,
+        "title": "未命名会议",
+        "date": "2026-07-23T10:00:00",
+        "duration": 300,
+        "status": "completed",
+        "compliance_score": 92.5,
+        "transcriptions": [...],
+        "summary": "会议摘要",
+        "keywords": [...],
+        "topics": [...],
+        "sentiment": {...},
+        "compliance_report": {...}
+    }
+}
+```
+
+### 3.3 创建会议（上传分析）
+
+**请求**:
+```
+POST /api/meetings
+```
+
+**Content-Type**: `multipart/form-data`
+
+**参数**:
+
+| 参数名 | 类型 | 必填 | 默认值 | 说明 |
+|--------|------|------|--------|------|
+| audio | File | 是 | - | 音频文件 |
+| title | String | 否 | 未命名会议 | 会议标题 |
+| language | String | 否 | zh | 语言 |
+| enable_diarization | Boolean | 否 | true | 启用说话人分离 |
+| enable_compliance | Boolean | 否 | true | 启用合规检查 |
+
+**响应**:
+```json
+{
+    "code": 200,
+    "message": "会议分析任务已创建",
+    "data": {
+        "meeting_id": 1,
+        "status": "processing"
+    }
+}
+```
+
+### 3.4 更新会议信息
+
+**请求**:
+```
+PUT /api/meetings/{meeting_id}
+```
+
+**Content-Type**: `application/json`
+
+**参数**:
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| title | String | 否 | 会议标题 |
+
+**响应**:
+```json
+{
+    "code": 200,
+    "message": "会议信息更新成功"
+}
+```
+
+### 3.5 删除会议
+
+**请求**:
+```
+DELETE /api/meetings/{meeting_id}
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "message": "会议删除成功"
+}
+```
+
+### 3.6 获取会议分析进度
+
+**请求**:
+```
+GET /api/meetings/{meeting_id}/progress
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": {
+        "meeting_id": 1,
+        "progress": 50,
+        "status": "processing",
+        "message": "正在进行说话人分离..."
+    }
+}
+```
+
+---
+
+## 4. 知识库管理
+
+### 4.1 获取知识库列表
+
+**请求**:
+```
+GET /api/knowledge-base
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": [
+        {
+            "id": 1,
+            "title": "合规要点1",
+            "content": "合规要点详细内容...",
+            "keywords": ["关键词1", "关键词2"],
+            "status": "active",
+            "created_at": "2026-07-23T10:00:00"
+        }
+    ]
+}
+```
+
+### 4.2 获取单个知识库条目
+
+**请求**:
+```
+GET /api/knowledge-base/{item_id}
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": {
+        "id": 1,
+        "title": "合规要点1",
+        "content": "合规要点详细内容...",
+        "keywords": ["关键词1", "关键词2"],
+        "status": "active",
+        "created_at": "2026-07-23T10:00:00"
+    }
+}
+```
+
+### 4.3 创建知识库条目
+
+**请求**:
+```
+POST /api/knowledge-base
+```
+
+**Content-Type**: `application/json`
+
+**参数**:
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| title | String | 是 | 条目标题 |
+| content | String | 是 | 条目内容 |
+| keywords | Array | 否 | 关键词列表 |
+
+**响应**:
+```json
+{
+    "code": 200,
+    "message": "知识库条目创建成功",
+    "data": {
+        "id": 1
+    }
+}
+```
+
+### 4.4 更新知识库条目
+
+**请求**:
+```
+PUT /api/knowledge-base/{item_id}
+```
+
+**Content-Type**: `application/json`
+
+**参数**:
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| title | String | 否 | 条目标题 |
+| content | String | 否 | 条目内容 |
+| keywords | Array | 否 | 关键词列表 |
+| status | String | 否 | 状态（active/inactive） |
+
+**响应**:
+```json
+{
+    "code": 200,
+    "message": "知识库条目更新成功"
+}
+```
+
+### 4.5 删除知识库条目
+
+**请求**:
+```
+DELETE /api/knowledge-base/{item_id}
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "message": "知识库条目删除成功"
+}
+```
+
+### 4.6 搜索知识库
+
+**请求**:
+```
+GET /api/knowledge-base/search?q={关键词}
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": [
+        {
+            "id": 1,
+            "title": "合规要点1",
+            "content": "合规要点详细内容...",
+            "similarity": 0.85
+        }
+    ]
+}
+```
+
+---
+
+## 5. 合规检查
+
+### 5.1 获取会议合规报告
+
+**请求**:
+```
+GET /api/meetings/{meeting_id}/compliance
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": {
+        "meeting_id": 1,
+        "score": 92.5,
+        "level": "优秀",
+        "missing_points": [],
+        "risk_content": [],
+        "suggestions": [],
+        "analysis_details": {
+            "semantic_similarity": 95,
+            "point_coverage": 90,
+            "risk_detection": 100,
+            "keyword_matching": 88
+        }
+    }
+}
+```
+
+---
+
+## 6. 评分权重
+
+### 6.1 获取评分权重配置
+
+**请求**:
+```
+GET /api/score-weights
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": {
+        "semantic_similarity": 40,
+        "point_coverage": 30,
+        "risk_detection": 20,
+        "keyword_matching": 10
+    }
+}
+```
+
+### 6.2 更新评分权重配置
+
+**请求**:
+```
+PUT /api/score-weights
+```
+
+**Content-Type**: `application/json`
+
+**参数**:
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| semantic_similarity | Integer | 否 | 语义相似度权重（0-100） |
+| point_coverage | Integer | 否 | 要点覆盖权重（0-100） |
+| risk_detection | Integer | 否 | 风险检测权重（0-100） |
+| keyword_matching | Integer | 否 | 关键词匹配权重（0-100） |
+
+**响应**:
+```json
+{
+    "code": 200,
+    "message": "评分权重更新成功"
+}
+```
+
+---
+
+## 7. 系统配置
+
+### 7.1 获取支持的语言列表
+
+**请求**:
+```
+GET /api/languages
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": [
+        {"code": "zh", "name": "中文"},
+        {"code": "en", "name": "英文"}
+    ]
+}
+```
+
+### 7.2 获取主题列表
+
+**请求**:
+```
+GET /api/topics
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": [
+        "工作汇报", "项目讨论", "问题解决", "决策制定",
+        "进度跟进", "计划安排", "意见交流", "培训学习"
+    ]
+}
+```
+
+### 7.3 获取风险关键词
+
+**请求**:
+```
+GET /api/risk-keywords
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": ["消极", "反对", "抵制", "抱怨", "不满", "拒绝", "不行", "不可能", "做不到"]
+}
+```
+
+### 7.4 获取硬件状态
+
+**请求**:
+```
+GET /api/hardware/status
+```
+
+**响应**:
+```json
+{
+    "code": 200,
+    "data": {
+        "cpu_usage": 35,
+        "memory_usage": 45,
+        "disk_usage": 60
+    }
+}
+```
+
+---
+
+## 8. 报告生成
+
+### 8.1 生成会议摘要报告
+
+**请求**:
+```
+GET /api/reports/meeting-summary/{meeting_id}
+```
+
+**响应**: 返回HTML格式的会议摘要报告
+
+### 8.2 生成合规趋势报告
+
+**请求**:
+```
+GET /api/reports/compliance-trend
+```
+
+**参数**:
+
+| 参数名 | 类型 | 必填 | 默认值 | 说明 |
+|--------|------|------|--------|------|
+| start_date | String | 否 | - | 开始日期（YYYY-MM-DD） |
+| end_date | String | 否 | - | 结束日期（YYYY-MM-DD） |
+
+**响应**: 返回HTML格式的合规趋势报告
 
 ---
 
@@ -241,92 +642,16 @@ curl http://localhost:5000/api/v1/health
 
 | 错误码 | 说明 |
 |--------|------|
-| 200 | 请求成功 |
+| 200 | 成功 |
 | 400 | 请求参数错误 |
+| 404 | 资源不存在 |
 | 500 | 服务器内部错误 |
-
----
-
-## 调用示例
-
-### Python 示例
-
-```python
-import requests
-
-# 方式一：上传文件
-url = "http://localhost:5000/api/v1/transcribe"
-files = {"audio": open("meeting.mp3", "rb")}
-data = {
-    "language": "zh",
-    "enable_compliance": "true",
-    "enable_diarization": "true"
-}
-response = requests.post(url, files=files, data=data)
-result = response.json()
-print(result)
-
-# 方式二：Base64编码
-import base64
-with open("meeting.mp3", "rb") as f:
-    audio_base64 = base64.b64encode(f.read()).decode()
-
-data = {
-    "audio_base64": audio_base64,
-    "language": "zh",
-    "enable_compliance": True,
-    "enable_diarization": True
-}
-response = requests.post(url, json=data)
-result = response.json()
-print(result)
-```
-
-### JavaScript 示例
-
-```javascript
-// 方式一：上传文件
-const formData = new FormData();
-formData.append('audio', fileInput.files[0]);
-formData.append('language', 'zh');
-formData.append('enable_compliance', 'true');
-formData.append('enable_diarization', 'true');
-
-fetch('http://localhost:5000/api/v1/transcribe', {
-    method: 'POST',
-    body: formData
-})
-.then(response => response.json())
-.then(data => console.log(data));
-
-// 方式二：Base64编码
-fetch('meeting.mp3')
-.then(response => response.arrayBuffer())
-.then(buffer => {
-    const audioBase64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
-    return fetch('http://localhost:5000/api/v1/transcribe', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            audio_base64: audioBase64,
-            language: 'zh',
-            enable_compliance: true,
-            enable_diarization: true
-        })
-    });
-})
-.then(response => response.json())
-.then(data => console.log(data));
-```
 
 ---
 
 ## 注意事项
 
-1. **音频格式**: 支持 mp3、wav、m4a 格式，推荐使用 wav 格式以获得最佳转写效果
-2. **音频采样率**: 建议使用 16kHz 采样率
-3. **响应时间**: 5分钟音频的分析时间约为 5-10 分钟（取决于是否启用说话人分离和合规检查）
-4. **并发限制**: 建议同时处理的请求不超过 1 个，避免内存和 CPU 资源不足
-5. **CORS**: 服务已启用 CORS，支持跨域调用
+1. **音频文件限制**: 最大支持256MB
+2. **分析时间**: 5分钟音频分析约需5-10分钟（首次运行需下载模型）
+3. **模型下载**: 首次运行会自动下载所需模型，需保持网络畅通
+4. **文件格式**: 支持 mp3, wav, m4a, ogg, flac 格式

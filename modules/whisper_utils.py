@@ -107,7 +107,7 @@ def fix_traditional_chinese(text):
 
 def transcribe_with_fix(model, audio_path, language='zh', **kwargs):
     """
-    使用强化的 initial_prompt 进行转写，并对结果做繁简后处理
+    使用 Whisper 进行转写，并对结果做繁简后处理
 
     参数:
         model: Whisper 模型实例
@@ -120,7 +120,6 @@ def transcribe_with_fix(model, audio_path, language='zh', **kwargs):
     """
     transcribe_kwargs = {
         'language': language,
-        'initial_prompt': ZH_INITIAL_PROMPT,
         'condition_on_previous_text': False,
     }
     transcribe_kwargs.update(kwargs)
