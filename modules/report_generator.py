@@ -6,27 +6,10 @@
 from datetime import datetime
 from io import BytesIO
 import json
+import html
 
-
-def generate_meeting_summary_report(meeting_data):
-    """
-    生成会议摘要报告
-    """
-    report = {
-        'report_id': meeting_data.get('meeting_id', 'unknown'),
-        'report_time': datetime.now().isoformat(),
-        'title': meeting_data.get('title', '未命名会议'),
-        'date': meeting_data.get('date', datetime.now().isoformat()),
-        'duration': meeting_data.get('duration', 0),
-        'participant_count': meeting_data.get('participant_count', 0),
-        'summary': meeting_data.get('summary', ''),
-        'topics': meeting_data.get('topics', []),
-        'keywords': meeting_data.get('keywords', []),
-        'sentiment': meeting_data.get('sentiment', {}),
-        'compliance': meeting_data.get('compliance', {}),
-        'transcription_count': len(meeting_data.get('transcriptions', []))
-    }
-    return report
+# 各 HTML 生成函数内部的局部变量 html 会遮蔽 html 模块，故用模块级别的别名调用转义函数
+_escape_html = html.escape
 
 
 def generate_compliance_trend_report(meetings_data):
@@ -37,7 +20,8 @@ def generate_compliance_trend_report(meetings_data):
         return None
     
     total_meetings = len(meetings_data)
-    total_score = sum(m.get('total_score', 0) for m in meetings_data)
+    # to_dict 中 total_score 为 0 时也会返回 None，故按 0 累加
+    total_score = sum((m.get('total_score') or 0) for m in meetings_data)
     avg_score = total_score / total_meetings
     
     score_distribution = {'excellent': 0, 'good': 0, 'pass': 0, 'fail': 0}
@@ -52,13 +36,19 @@ def generate_compliance_trend_report(meetings_data):
         else:
             score_distribution['fail'] += 1
     
+    def _get(obj, name, default=None):
+        # 兼容 SQLAlchemy 模型对象和普通 dict 两种入参
+        return obj.get(name, default) if isinstance(obj, dict) else getattr(obj, name, default)
+
     risk_count = 0
     missing_points_count = 0
     for m in meetings_data:
         compliance = m.get('compliance_report')
         if compliance:
-            risk_keywords = json.loads(compliance.risk_keywords) if compliance.risk_keywords else []
-            missing_points = json.loads(compliance.missing_points) if compliance.missing_points else []
+            risk_raw = _get(compliance, 'risk_keywords')
+            missing_raw = _get(compliance, 'missing_points')
+            risk_keywords = json.loads(risk_raw) if isinstance(risk_raw, str) and risk_raw else (risk_raw or [])
+            missing_points = json.loads(missing_raw) if isinstance(missing_raw, str) and missing_raw else (missing_raw or [])
             risk_count += len(risk_keywords)
             missing_points_count += len(missing_points)
     
@@ -71,7 +61,7 @@ def generate_compliance_trend_report(meetings_data):
         'statistics': {
             'total_meetings': total_meetings,
             'avg_score': round(avg_score, 2),
-            'avg_duration': round(sum(m.get('duration', 0) for m in meetings_data) / total_meetings, 0),
+            'avg_duration': round(sum((m.get('duration') or 0) for m in meetings_data) / total_meetings, 0),
             'total_risk_items': risk_count,
             'total_missing_points': missing_points_count,
             'score_distribution': score_distribution
@@ -79,7 +69,7 @@ def generate_compliance_trend_report(meetings_data):
         'trend_data': [
             {
                 'date': m.get('date', ''),
-                'score': m.get('total_score', 0),
+                'score': m.get('total_score') or 0,
                 'level': m.get('score_level', '')
             } for m in meetings_data
         ],
@@ -128,7 +118,7 @@ def _generate_meeting_summary_html(data):
     html = f"""
     <html>
     <head>
-        <title>会议摘要报告 - {data['title']}</title>
+        <title>会议摘要报告 - {_escape_html(str(data['title']))}</title>
         <style>
             body {{ font-family: 'Microsoft YaHei', Arial, sans-serif; margin: 40px; }}
             .header {{ border-bottom: 2px solid #667eea; padding-bottom: 20px; margin-bottom: 30px; }}
@@ -156,30 +146,43 @@ def _generate_meeting_summary_html(data):
             .risk-item {{ background: #fff1f0; padding: 8px; margin: 4px 0; border-radius: 4px; }}
             .missing-item {{ background: #fffbe6; padding: 8px; margin: 4px 0; border-radius: 4px; }}
             .suggestion {{ background: #f6ffed; padding: 8px; margin: 4px 0; border-radius: 4px; }}
+            .decision-item {{ background: #e6f7ff; padding: 8px 10px; margin: 4px 0; border-radius: 4px; border-left: 3px solid #1890ff; }}
+            .action-item {{ background: #fffbe6; padding: 8px 10px; margin: 4px 0; border-radius: 4px; border-left: 3px solid #faad14; }}
+            .muted {{ color: #999; }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>会议摘要报告</h1>
-            <div class="info-row"><span class="info-label">会议标题:</span><span class="info-value">{data['title']}</span></div>
-            <div class="info-row"><span class="info-label">会议时间:</span><span class="info-value">{data['date']}</span></div>
-            <div class="info-row"><span class="info-label">会议时长:</span><span class="info-value">{data['duration']} 分钟</span></div>
-            <div class="info-row"><span class="info-label">参会人数:</span><span class="info-value">{data['participant_count']} 人</span></div>
+            <div class="info-row"><span class="info-label">会议标题:</span><span class="info-value">{_escape_html(str(data['title']))}</span></div>
+            <div class="info-row"><span class="info-label">会议时间:</span><span class="info-value">{_escape_html(str(data['date']))}</span></div>
+            <div class="info-row"><span class="info-label">会议时长:</span><span class="info-value">{_escape_html(str(data['duration']))} 分钟</span></div>
+            <div class="info-row"><span class="info-label">参会人数:</span><span class="info-value">{_escape_html(str(data['participant_count']))} 人</span></div>
         </div>
-        
+
         <div class="section">
             <div class="section-title">会议摘要</div>
-            <p>{data['summary']}</p>
+            <p>{_escape_html(str(data['summary']))}</p>
         </div>
-        
+
+        <div class="section">
+            <div class="section-title">决议结论</div>
+            {''.join([f'<div class="decision-item">{_escape_html(str(d))}</div>' for d in data.get('decisions', [])]) or '<p class="muted">本次会议未提取到决议结论</p>'}
+        </div>
+
+        <div class="section">
+            <div class="section-title">待办事项</div>
+            {''.join([f'<div class="action-item">{_escape_html(str(a))}</div>' for a in data.get('action_items', [])]) or '<p class="muted">本次会议未提取到待办事项</p>'}
+        </div>
+
         <div class="section">
             <div class="section-title">讨论主题</div>
-            {''.join([f'<div class="topic"><span class="topic-name">{t["topic"]}</span><div class="topic-bar"><div class="topic-fill" style="width:{t["score"]*100}%"></div></div></div>' for t in data.get('topics', [])])}
+            {''.join([f'<div class="topic"><span class="topic-name">{_escape_html(str(t["topic"]))}</span><div class="topic-bar"><div class="topic-fill" style="width:{_escape_html(str(t["score"]*100))}%"></div></div></div>' for t in data.get('topics', [])])}
         </div>
-        
+
         <div class="section">
             <div class="section-title">关键词</div>
-            {''.join([f'<span class="keyword">{k["word"]} ({k["frequency"]})</span>' for k in data.get('keywords', [])])}
+            {''.join([f'<span class="keyword">{_escape_html(str(k["word"]))} ({_escape_html(str(k["frequency"]))})</span>' for k in data.get('keywords', [])])}
         </div>
         
         <div class="section">
@@ -203,27 +206,27 @@ def _get_score_html(compliance):
     
     html = f"""
     <div class="score-box score-{class_name}">
-        <div class="score-value">{compliance.get('total_score', 0)}</div>
-        <div style="color:#666;">{level}</div>
+        <div class="score-value">{_escape_html(str(compliance.get('total_score', 0)))}</div>
+        <div style="color:#666;">{_escape_html(str(level))}</div>
     </div>
     """
     
     if compliance.get('risk_keywords'):
         html += '<div style="margin-top:15px;"><h4>风险内容:</h4>'
         for kw in compliance['risk_keywords']:
-            html += f'<div class="risk-item">⚠ {kw}</div>'
+            html += f'<div class="risk-item">⚠ {_escape_html(str(kw))}</div>'
         html += '</div>'
     
     if compliance.get('missing_points'):
         html += '<div style="margin-top:15px;"><h4>缺失要点:</h4>'
         for point in compliance['missing_points']:
-            html += f'<div class="missing-item">✗ {point}</div>'
+            html += f'<div class="missing-item">✗ {_escape_html(str(point))}</div>'
         html += '</div>'
     
     if compliance.get('suggestions'):
         html += '<div style="margin-top:15px;"><h4>改进建议:</h4>'
         for suggestion in compliance['suggestions']:
-            html += f'<div class="suggestion">→ {suggestion}</div>'
+            html += f'<div class="suggestion">→ {_escape_html(str(suggestion))}</div>'
         html += '</div>'
     
     return html
@@ -263,28 +266,28 @@ def _generate_compliance_trend_html(data):
     <body>
         <div class="header">
             <h1>合规趋势报表</h1>
-            <p>统计周期: {data['time_range']['start']} ~ {data['time_range']['end']}</p>
+            <p>统计周期: {_escape_html(str(data['time_range']['start']))} ~ {_escape_html(str(data['time_range']['end']))}</p>
         </div>
         
         <div class="section">
             <div class="section-title">总体统计</div>
-            <div class="stat-card stat-card-blue"><div class="stat-value">{stats['total_meetings']}</div><div class="stat-label">会议总数</div></div>
-            <div class="stat-card stat-card-green"><div class="stat-value">{stats['avg_score']}</div><div class="stat-label">平均评分</div></div>
-            <div class="stat-card stat-card-yellow"><div class="stat-value">{stats['avg_duration']}</div><div class="stat-label">平均时长(分钟)</div></div>
-            <div class="stat-card stat-card-red"><div class="stat-value">{stats['total_risk_items']}</div><div class="stat-label">风险内容总数</div></div>
+            <div class="stat-card stat-card-blue"><div class="stat-value">{_escape_html(str(stats['total_meetings']))}</div><div class="stat-label">会议总数</div></div>
+            <div class="stat-card stat-card-green"><div class="stat-value">{_escape_html(str(stats['avg_score']))}</div><div class="stat-label">平均评分</div></div>
+            <div class="stat-card stat-card-yellow"><div class="stat-value">{_escape_html(str(stats['avg_duration']))}</div><div class="stat-label">平均时长(分钟)</div></div>
+            <div class="stat-card stat-card-red"><div class="stat-value">{_escape_html(str(stats['total_risk_items']))}</div><div class="stat-label">风险内容总数</div></div>
         </div>
         
         <div class="section">
             <div class="section-title">评分分布</div>
-            <div>优秀 ({stats['score_distribution']['excellent']}): <div class="distribution-bar" style="width:{stats['score_distribution']['excellent']/stats['total_meetings']*100}%" class="dist-excellent"></div></div>
-            <div>良好 ({stats['score_distribution']['good']}): <div class="distribution-bar" style="width:{stats['score_distribution']['good']/stats['total_meetings']*100}%" class="dist-good"></div></div>
-            <div>合格 ({stats['score_distribution']['pass']}): <div class="distribution-bar" style="width:{stats['score_distribution']['pass']/stats['total_meetings']*100}%" class="dist-pass"></div></div>
-            <div>不合格 ({stats['score_distribution']['fail']}): <div class="distribution-bar" style="width:{stats['score_distribution']['fail']/stats['total_meetings']*100}%" class="dist-fail"></div></div>
+            <div>优秀 ({_escape_html(str(stats['score_distribution']['excellent']))}): <div class="distribution-bar dist-excellent" style="width:{_escape_html(str(stats['score_distribution']['excellent']/stats['total_meetings']*100))}%"></div></div>
+            <div>良好 ({_escape_html(str(stats['score_distribution']['good']))}): <div class="distribution-bar dist-good" style="width:{_escape_html(str(stats['score_distribution']['good']/stats['total_meetings']*100))}%"></div></div>
+            <div>合格 ({_escape_html(str(stats['score_distribution']['pass']))}): <div class="distribution-bar dist-pass" style="width:{_escape_html(str(stats['score_distribution']['pass']/stats['total_meetings']*100))}%"></div></div>
+            <div>不合格 ({_escape_html(str(stats['score_distribution']['fail']))}): <div class="distribution-bar dist-fail" style="width:{_escape_html(str(stats['score_distribution']['fail']/stats['total_meetings']*100))}%"></div></div>
         </div>
         
         <div class="section">
             <div class="section-title">改进建议</div>
-            {''.join([f'<div class="suggestion">{s}</div>' for s in data.get('recommendations', [])])}
+            {''.join([f'<div class="suggestion">{_escape_html(str(s))}</div>' for s in data.get('recommendations', [])])}
         </div>
     </body>
     </html>

@@ -200,6 +200,11 @@
                 </div>
 
                 <div class="card">
+                    <div class="card-title">✅ 待办事项与决议结论</div>
+                    <div id="action-items-detail"></div>
+                </div>
+
+                <div class="card">
                     <div class="card-title">🔊 语音转写</div>
                     <div id="transcription-list"></div>
                 </div>
@@ -231,11 +236,14 @@
                 <div class="card">
                     <div class="card-title">📋 合规报告</div>
                     <div id="compliance-detail"></div>
+                    <div style="margin-top:16px;">
+                        <button class="btn btn-primary" onclick="exportCurrentMeetingReport()">导出会议纪要报表</button>
+                    </div>
                 </div>
             </div>
 
             <div class="card">
-                <div class="card-title">📝 历史会议</div>
+                <div class="card-title">📝 历史会议 <span id="meeting-total" style="font-size:13px; color:#999; font-weight:400;"></span></div>
                 <table class="table">
                     <thead>
                         <tr>
@@ -296,7 +304,7 @@
             </div>
 
             <div class="card">
-                <div class="card-title">📖 知识库列表</div>
+                <div class="card-title">📖 知识库列表 <span id="kb-total" style="font-size:13px; color:#999; font-weight:400;"></span></div>
                 <div style="display:flex; gap:16px; margin-bottom:16px;">
                     <input type="text" id="kb-search" placeholder="搜索关键词" style="flex:1; padding:8px;">
                     <button class="btn btn-secondary" onclick="searchKnowledge()">搜索</button>
@@ -346,7 +354,7 @@
             </div>
 
             <div class="card">
-                <div class="card-title">📝 合规报告列表</div>
+                <div class="card-title">📝 合规报告列表 <span id="report-total" style="font-size:13px; color:#999; font-weight:400;"></span></div>
                 <table class="table">
                     <thead>
                         <tr>
@@ -466,13 +474,32 @@
         const API_BASE = '/api';
         let currentFile = null;
         let editingKbId = null;
+        let currentMeetingId = null;
+
+        // 导出当前展示会议的会议纪要报表（HTML，可在浏览器打印为 PDF）
+        function exportCurrentMeetingReport() {
+            if (!currentMeetingId) {
+                alert('请先完成一次分析或打开一场会议详情，再导出报表。');
+                return;
+            }
+            window.open(`${API_BASE}/reports/meeting-summary/${currentMeetingId}`, '_blank');
+        }
 
         function showTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.header .nav button').forEach(el => el.classList.remove('active'));
             document.getElementById(tabId).classList.add('active');
-            event.target.classList.add('active');
-            
+
+            // 高亮对应按钮：不依赖全局 event 对象。
+            // 旧实现用 event.target，程序化调用（或某些浏览器）下 event 为 undefined，
+            // 会在这一行抛错，导致后面的数据加载永远不执行——页签切过去却是空白。
+            document.querySelectorAll('.header .nav button').forEach(btn => {
+                const handler = btn.getAttribute('onclick') || '';
+                if (handler.includes("'" + tabId + "'") || handler.includes('"' + tabId + '"')) {
+                    btn.classList.add('active');
+                }
+            });
+
             if (tabId === 'meeting') loadMeetingList();
             if (tabId === 'knowledge') loadKnowledgeList();
             if (tabId === 'reports') loadReports();
@@ -593,62 +620,101 @@
         }
 
         function renderResult(data) {
-            document.getElementById('result-duration').textContent = Math.round(data.duration / 60);
+            data = data || {};
+            // 渲染即展示：避免调用方忘了把结果区打开而让用户看不到结果
+            const section = document.getElementById('result-section');
+            if (section) section.style.display = 'block';
 
-            const speakers = new Set(data.transcriptions.map(t => t.speaker));
+            const transcriptions = data.transcriptions || [];
+            const keywords = data.keywords || [];
+            const topics = data.topics || [];
+
+            currentMeetingId = data.id || data.meeting_id || currentMeetingId;
+            document.getElementById('result-duration').textContent = Math.round((data.duration || 0) / 60);
+
+            const speakers = new Set(transcriptions.map(t => t.speaker));
             document.getElementById('result-speakers').textContent = speakers.size;
 
-            document.getElementById('result-topic').textContent = data.topics[0]?.topic || '--';
+            document.getElementById('result-topic').textContent = topics[0]?.topic || '--';
 
-            if (data.compliance_report) {
-                document.getElementById('result-score').textContent = data.compliance_report.total_score;
-            }
+            const report = data.compliance_report || data.compliance || null;
+            document.getElementById('result-score').textContent =
+                report && report.total_score != null ? report.total_score : '--';
 
             // 摘要展示
             const summaryEl = document.getElementById('summary-detail');
             summaryEl.innerHTML = `<p style="font-size:14px; line-height:1.8; color:#333;">${data.summary || '暂无摘要'}</p>`;
 
+            // 待办事项 / 决议结论（结构化纪要）
+            const actionItems = data.action_items || [];
+            const decisions = data.decisions || [];
+            const actionEl = document.getElementById('action-items-detail');
+            if (actionEl) {
+                if (actionItems.length || decisions.length) {
+                    actionEl.innerHTML = `
+                        ${decisions.length ? `
+                            <div class="result-card" style="padding:12px; margin-bottom:10px; border-left:4px solid #1890ff;">
+                                <div style="font-weight:600; color:#1890ff; margin-bottom:6px;">决议结论</div>
+                                ${decisions.map(d => `<div style="font-size:13px; margin:4px 0;">• ${d}</div>`).join('')}
+                            </div>` : ''}
+                        ${actionItems.length ? `
+                            <div class="result-card" style="padding:12px; border-left:4px solid #faad14;">
+                                <div style="font-weight:600; color:#d48806; margin-bottom:6px;">待办事项</div>
+                                ${actionItems.map(a => `<div style="font-size:13px; margin:4px 0;">• ${a}</div>`).join('')}
+                            </div>` : ''}
+                    `;
+                } else {
+                    actionEl.innerHTML = '<p style="color:#999;">未提取到待办事项或决议结论</p>';
+                }
+            }
+
             // 转写列表
             const transList = document.getElementById('transcription-list');
-            transList.innerHTML = data.transcriptions.map(t => `
+            transList.innerHTML = transcriptions.length ? transcriptions.map(t => `
                 <div class="result-card">
                     <div style="display:flex; align-items:center; margin-bottom:8px;">
-                        <span class="speaker-tag">${t.speaker}</span>
+                        <span class="speaker-tag">${t.speaker || 'SPEAKER_00'}</span>
                         <span class="timeline">${formatTime(t.start_time)} - ${formatTime(t.end_time)}</span>
                         ${t.confidence ? `<span style="font-size:12px;color:#999;">置信度:${(t.confidence*100).toFixed(0)}%</span>` : ''}
                     </div>
-                    <p>${t.text}</p>
+                    <p>${t.text || ''}</p>
                 </div>
-            `).join('');
+            `).join('') : '<p style="color:#999;">暂无转写内容</p>';
 
             // 关键词
             const kwList = document.getElementById('keyword-list');
-            kwList.innerHTML = data.keywords.map(k => `<span class="keyword-tag">${k.word} (${k.frequency})</span>`).join('');
+            kwList.innerHTML = keywords.length
+                ? keywords.map(k => `<span class="keyword-tag">${k.word} (${k.frequency})</span>`).join('')
+                : '<span style="color:#999;">暂无关键词</span>';
 
             // 主题列表
             const topicList = document.getElementById('topic-list');
-            topicList.innerHTML = data.topics.map(t => `
+            topicList.innerHTML = topics.length ? topics.map(t => `
                 <div class="result-card" style="padding:8px 12px; margin-bottom:8px;">
                     <span style="font-size:14px;">${t.topic}</span>
                     <div style="background:#e0e0e0; border-radius:4px; height:6px; margin-top:4px;">
-                        <div style="background:#667eea; height:6px; border-radius:4px; width:${(t.score*100).toFixed(0)}%;"></div>
+                        <div style="background:#667eea; height:6px; border-radius:4px; width:${((t.score || 0)*100).toFixed(0)}%;"></div>
                     </div>
-                    <span style="font-size:12px; color:#999;">${(t.score*100).toFixed(1)}%</span>
+                    <span style="font-size:12px; color:#999;">${((t.score || 0)*100).toFixed(1)}%</span>
                 </div>
-            `).join('');
+            `).join('') : '<p style="color:#999;">暂无主题分析结果</p>';
 
             // 情绪分析
             const sentimentEl = document.getElementById('sentiment-detail');
-            if (data.sentiment) {
-                const s = data.sentiment;
+            const s = data.sentiment;
+            if (s && s.sentiment) {
                 const sentimentColor = s.sentiment === 'positive' ? '#52c41a' : s.sentiment === 'negative' ? '#ff4d4f' : '#faad14';
                 const sentimentText = s.sentiment === 'positive' ? '积极' : s.sentiment === 'negative' ? '消极' : '中性';
                 sentimentEl.innerHTML = `
                     <div class="result-card" style="padding:12px;">
                         <div style="font-size:24px; color:${sentimentColor}; font-weight:700;">${sentimentText}</div>
-                        <div style="font-size:12px; color:#999; margin-top:4px;">正面词汇: ${s.positive} | 负面词汇: ${s.negative}</div>
+                        <div style="font-size:12px; color:#999; margin-top:4px;">
+                            正面得分: ${s.positive_score ?? '--'} | 负面得分: ${s.negative_score ?? '--'}
+                        </div>
                     </div>
                 `;
+            } else {
+                sentimentEl.innerHTML = '<p style="color:#999;">暂无情绪分析结果</p>';
             }
 
             // 音频质量报告
@@ -680,16 +746,23 @@
 
             // 合规报告
             const compDetail = document.getElementById('compliance-detail');
-            if (data.compliance_report) {
-                const c = data.compliance_report;
-                
+            if (report) {
+                const c = report;
+                // 详情接口的字段是 detailed_scores；实时结果里是 components，两者都兼容
+                const detail = c.detailed_scores || c.components || {};
+                const riskKeywords = c.risk_keywords || c.risk_keywords_found || [];
+                const missingPoints = c.missing_points || [];
+                const riskMarkers = c.risk_time_markers || [];
+                const pointMarkers = c.point_time_markers || [];
+                const suggestions = c.suggestions || [];
+
                 // 风险时间节点列表
                 let riskMarkersHtml = '';
-                if (c.risk_time_markers && c.risk_time_markers.length > 0) {
+                if (riskMarkers.length > 0) {
                     riskMarkersHtml = `
                         <div style="margin-top:12px; background:#fff1f0; padding:12px; border-radius:8px; border-left:4px solid #ff4d4f;">
-                            <div style="font-weight:600; color:#ff4d4f; margin-bottom:8px;">⚠️ 风险内容时间节点（点击可回溯）</div>
-                            ${c.risk_time_markers.map(r => `
+                            <div style="font-weight:600; color:#ff4d4f; margin-bottom:8px;">⚠️ 风险内容时间节点（点击查看详情）</div>
+                            ${riskMarkers.map(r => `
                                 <div style="padding:8px; margin:4px 0; background:#fff; border-radius:4px; cursor:pointer;" onclick="alert('时间: ${r.start_time}秒 - ${r.end_time}秒\\n内容: ${r.text}\\n严重程度: ${r.severity}')">
                                     <span style="color:#ff4d4f; font-weight:600;">${r.keyword}</span>
                                     <span style="color:#999; margin-left:8px;">[${formatTime(r.start_time)} - ${formatTime(r.end_time)}]</span>
@@ -699,14 +772,14 @@
                         </div>
                     `;
                 }
-                
+
                 // 要点时间节点列表
                 let pointMarkersHtml = '';
-                if (c.point_time_markers && c.point_time_markers.length > 0) {
+                if (pointMarkers.length > 0) {
                     pointMarkersHtml = `
                         <div style="margin-top:12px; background:#f6ffed; padding:12px; border-radius:8px; border-left:4px solid #52c41a;">
                             <div style="font-weight:600; color:#52c41a; margin-bottom:8px;">✓ 已覆盖要点时间节点</div>
-                            ${c.point_time_markers.map(p => `
+                            ${pointMarkers.map(p => `
                                 <div style="padding:8px; margin:4px 0; background:#fff; border-radius:4px;">
                                     <span style="color:#52c41a; font-weight:600;">${p.point}</span>
                                     <span style="color:#999; margin-left:8px;">[${formatTime(p.start_time)} - ${formatTime(p.end_time)}]</span>
@@ -716,196 +789,348 @@
                         </div>
                     `;
                 }
-                
+
                 compDetail.innerHTML = `
                     <div style="display:flex; gap:20px; margin-bottom:20px;">
                         <div style="flex:1; text-align:center;">
-                            <div style="font-size:48px; font-weight:700; color:#667eea;">${c.total_score}</div>
+                            <div style="font-size:48px; font-weight:700; color:#667eea;">${c.total_score ?? '--'}</div>
                             <div style="color:#666;">合规评分</div>
                         </div>
                         <div style="flex:2;">
-                            <div style="margin-bottom:10px;">等级: <span class="score-badge score-${getScoreClass(c.score_level)}">${c.score_level}</span></div>
+                            <div style="margin-bottom:10px;">等级: <span class="score-badge score-${getScoreClass(c.score_level)}">${c.score_level || '--'}</span></div>
                             <div style="margin-bottom:10px;">
                                 <div style="font-size:12px; color:#999; margin-bottom:4px;">评分明细</div>
-                                <div style="font-size:13px;">语义相似度: ${(c.components && c.components.semantic_similarity)?.toFixed(1) || 0}分</div>
-                                <div style="font-size:13px;">要点覆盖: ${(c.components && c.components.point_coverage)?.toFixed(1) || 0}分</div>
-                                <div style="font-size:13px;">风险检测: ${(c.components && c.components.risk_detection)?.toFixed(1) || 0}分</div>
-                                <div style="font-size:13px;">关键词命中: ${(c.components && c.components.keyword_matching)?.toFixed(1) || 0}分</div>
+                                <div style="font-size:13px;">语义相似度: ${(detail.semantic_similarity ?? 0).toFixed(1)}分</div>
+                                <div style="font-size:13px;">要点覆盖: ${(detail.point_coverage ?? 0).toFixed(1)}分</div>
+                                <div style="font-size:13px;">风险检测: ${(detail.risk_detection ?? 0).toFixed(1)}分</div>
+                                <div style="font-size:13px;">关键词命中: ${(detail.keyword_matching ?? 0).toFixed(1)}分</div>
                             </div>
-                            ${c.missing_points?.length ? `<div style="margin-bottom:10px;"><span style="font-size:12px;color:#999;">遗漏要点:</span> ${c.missing_points.map(p => `<span class="missing-item">${p}</span>`).join(' ')}</div>` : ''}
-                            ${c.risk_keywords?.length && !c.risk_time_markers?.length ? `<div style="margin-bottom:10px;"><span style="font-size:12px;color:#999;">风险内容:</span> ${c.risk_keywords.map(r => `<span class="risk-item">${r}</span>`).join(' ')}</div>` : ''}
+                            ${missingPoints.length ? `<div style="margin-bottom:10px;"><span style="font-size:12px;color:#999;">遗漏要点:</span> ${missingPoints.map(p => `<span class="missing-item">${p}</span>`).join(' ')}</div>` : ''}
+                            ${riskKeywords.length && !riskMarkers.length ? `<div style="margin-bottom:10px;"><span style="font-size:12px;color:#999;">风险内容:</span> ${riskKeywords.map(r => `<span class="risk-item">${r}</span>`).join(' ')}</div>` : ''}
                         </div>
                     </div>
                     ${riskMarkersHtml}
                     ${pointMarkersHtml}
-                    <div style="margin-top:12px; background:#fffbe6; padding:8px; border-radius:4px; font-size:13px;">${c.suggestions.join('<br>')}</div>
+                    ${suggestions.length ? `<div style="margin-top:12px; background:#fffbe6; padding:8px; border-radius:4px; font-size:13px;">${suggestions.join('<br>')}</div>` : ''}
                 `;
             } else {
-                compDetail.innerHTML = '<p>未启用合规检查</p>';
+                compDetail.innerHTML = '<p style="color:#999;">未启用合规检查或知识库为空</p>';
             }
         }
 
         // 实时转写
-        let socket = null;
-        let mediaRecorder = null;
+        // 说明：这里走 HTTP 分块上传 + 轮询（/api/realtime/*），不再依赖 socket.io 的
+        // 浏览器客户端。原因：客户端脚本只能从 CDN 加载，而本系统要在无外网环境运行，
+        // 加载失败会让整个实时功能点了没反应。现在只用浏览器自带的 fetch/getUserMedia。
         let audioContext = null;
         let mediaStream = null;
+        let audioProcessor = null;
+        let realtimeSessionId = null;
+        let realtimeTimer = null;
+        let realtimePollTimer = null;
+        let realtimeChunkQueue = [];
+        let realtimeSending = false;
+
+        const REALTIME_CHUNK_MS = 500;      // 每 500ms 上传一块音频
+        const REALTIME_STOP_TIMEOUT = 45000; // 停止后等待分析的兜底超时（ms）
+
+        function resetRealtimeButtons() {
+            document.getElementById('realtime-start-btn').disabled = false;
+            document.getElementById('realtime-stop-btn').disabled = true;
+            document.getElementById('realtime-status').textContent = '未连接';
+            document.getElementById('realtime-status').style.color = '#999';
+            document.getElementById('recording-indicator').style.display = 'none';
+        }
+
+        function releaseAudio() {
+            if (audioProcessor) {
+                try { audioProcessor.disconnect(); } catch (e) { /* 已断开 */ }
+                audioProcessor.onaudioprocess = null;
+                audioProcessor = null;
+            }
+            if (audioContext) {
+                try { audioContext.close(); } catch (e) { /* 已关闭 */ }
+                audioContext = null;
+            }
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(t => t.stop());
+                mediaStream = null;
+            }
+            if (realtimeTimer) {
+                clearInterval(realtimeTimer);
+                realtimeTimer = null;
+            }
+            if (realtimePollTimer) {
+                clearInterval(realtimePollTimer);
+                realtimePollTimer = null;
+            }
+        }
+
+        function appendRealtimeText(text, compliance) {
+            const el = document.getElementById('realtime-transcription');
+            if (el.querySelector('span[style*="color:#999"]')) {
+                el.innerHTML = '';
+            }
+            let html = `<p style="margin-bottom:8px;">${text}</p>`;
+
+            // 实时合规告警：会议进行中当场提示，并标注发生时间便于回溯
+            (compliance || []).forEach((alert) => {
+                const items = alert.risk_items || [];
+                const time = formatTime(
+                    (items[0] && items[0].start_time) ?? alert.start_time ?? 0);
+                if (alert.has_risk) {
+                    const names = (alert.risk_keywords && alert.risk_keywords.length
+                        ? alert.risk_keywords
+                        : items.map(r => r.keyword)).join('、');
+                    html += `<p style="margin:0 0 8px 0;padding:6px 8px;border-radius:4px;`
+                         + `background:#fff2f0;border-left:3px solid #ff4d4f;color:#cf1322;font-size:13px;">`
+                         + `⚠ 风险提示（${time}）：${names}</p>`;
+                }
+                if (alert.covered_points && alert.covered_points.length > 0) {
+                    const names = alert.covered_points.map(p => p.point).join('、');
+                    const pointTime = formatTime(alert.covered_points[0].start_time ?? 0);
+                    html += `<p style="margin:0 0 8px 0;padding:6px 8px;border-radius:4px;`
+                         + `background:#f6ffed;border-left:3px solid #52c41a;color:#237804;font-size:13px;">`
+                         + `✓ 已覆盖要点（${pointTime}）：${names}</p>`;
+                }
+            });
+
+            el.innerHTML += html;
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function pcmToBase64(inputData) {
+            const pcmData = new Int16Array(inputData.length);
+            for (let i = 0; i < inputData.length; i++) {
+                pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+            }
+            const bytes = new Uint8Array(pcmData.buffer);
+            // 分块拼接，避免超长音频时 String.fromCharCode 参数过多导致卡顿
+            let binary = '';
+            const step = 8192;
+            for (let i = 0; i < bytes.length; i += step) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+            }
+            return btoa(binary);
+        }
+
+        async function flushRealtimeQueue() {
+            if (realtimeSending || !realtimeSessionId || realtimeChunkQueue.length === 0) {
+                return;
+            }
+            realtimeSending = true;
+            const chunks = realtimeChunkQueue;
+            realtimeChunkQueue = [];
+            try {
+                for (const base64 of chunks) {
+                    const response = await fetch(`${API_BASE}/realtime/chunk`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: realtimeSessionId, audio: base64 })
+                    });
+                    if (!response.ok) {
+                        const err = await response.json().catch(() => ({}));
+                        throw new Error(err.message || `HTTP ${response.status}`);
+                    }
+                    const payload = await response.json();
+                    const data = payload.data;
+                    if (data && data.text) {
+                        appendRealtimeText(data.text, data.compliance);
+                    }
+                }
+            } catch (error) {
+                console.error('实时音频上传失败:', error);
+                document.getElementById('realtime-status').textContent = '上传失败';
+                document.getElementById('realtime-status').style.color = '#ff4d4f';
+            } finally {
+                realtimeSending = false;
+            }
+        }
 
         async function startRealtime() {
             try {
-                // 加载socket.io
-                if (!window.io) {
-                    const script = document.createElement('script');
-                    script.src = 'https://cdn.socket.io/4.5.4/socket.io.min.js';
-                    document.head.appendChild(script);
-                    await new Promise(resolve => script.onload = resolve);
-                }
-
-                // 建立WebSocket连接
-                socket = io('http://localhost:5000');
-
-                socket.on('connect', () => {
-                    const title = document.getElementById('meeting-title').value || '实时会议';
-                    socket.emit('start_transcription', { language: 'zh', meeting_title: title });
-                    document.getElementById('realtime-status').textContent = '已连接';
-                    document.getElementById('realtime-status').style.color = '#52c41a';
-                });
-
-                socket.on('transcription_started', (data) => {
-                    console.log('Transcription started:', data);
-                });
-
-                socket.on('transcription_result', (data) => {
-                    const el = document.getElementById('realtime-transcription');
-                    if (el.querySelector('span[style*="color:#999"]')) {
-                        el.innerHTML = '';
-                    }
-                    let html = `<p style="margin-bottom:8px;">${data.text}</p>`;
-                    el.innerHTML += html;
-                    el.scrollTop = el.scrollHeight;
-                });
-
-                socket.on('transcription_stopped', (data) => {
-                    console.log('Transcription stopped, starting analysis...');
-                    document.getElementById('loading').classList.add('show');
-                    document.getElementById('analysis-progress-bar').style.width = '0%';
-                    document.getElementById('analysis-progress-text').textContent = '准备分析...';
-                    document.getElementById('analysis-progress-percent').textContent = '0%';
-                });
-
-                socket.on('realtime_analysis_progress', (data) => {
-                    console.log('Analysis progress:', data.progress + '%', data.message);
-                    document.getElementById('analysis-progress-bar').style.width = Math.max(0, data.progress) + '%';
-                    document.getElementById('analysis-progress-text').textContent = data.message;
-                    document.getElementById('analysis-progress-percent').textContent = Math.max(0, data.progress) + '%';
-                    
-                    if (data.progress < 0) {
-                        alert('分析失败: ' + data.message);
-                        document.getElementById('loading').classList.remove('show');
-                        
-                        document.getElementById('realtime-start-btn').disabled = false;
-                        document.getElementById('realtime-stop-btn').disabled = true;
-                        document.getElementById('realtime-status').textContent = '未连接';
-                        document.getElementById('realtime-status').style.color = '#999';
-                        
-                        if (socket) {
-                            socket.disconnect();
-                            socket = null;
-                        }
-                    }
-                });
-
-                socket.on('transcription_final', (data) => {
-                    document.getElementById('loading').classList.remove('show');
-                    document.getElementById('result-section').style.display = 'block';
-                    renderResult(data);
-                    loadMeetingList();
-                    
-                    document.getElementById('realtime-start-btn').disabled = false;
-                    document.getElementById('realtime-stop-btn').disabled = true;
-                    document.getElementById('realtime-status').textContent = '未连接';
-                    document.getElementById('realtime-status').style.color = '#999';
-                    
-                    if (socket) {
-                        socket.disconnect();
-                        socket = null;
-                    }
-                });
-
-                socket.on('error', (data) => {
-                    console.error('Socket error:', data);
-                });
-
-                // 获取麦克风权限（使用用户选择的麦克风）
                 const micSelect = document.getElementById('mic-select');
                 const selectedDeviceId = micSelect ? micSelect.value : '';
                 const constraints = selectedDeviceId
-                    ? { audio: { deviceId: { exact: selectedDeviceId }, sampleRate: 16000 } }
-                    : { audio: { sampleRate: 16000 } };
+                    ? { audio: { deviceId: { exact: selectedDeviceId } } }
+                    : { audio: true };
+
                 mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-                audioContext = new AudioContext({ sampleRate: 16000 });
 
-                // 使用ScriptProcessor采集音频
+                // 请求 16kHz，但必须读取实际生效的采样率并上报给后端：
+                // 浏览器可能给到 44100/48000，若后端按 16k 解释，时长与时间戳会错位。
+                try {
+                    audioContext = new AudioContext({ sampleRate: 16000 });
+                } catch (e) {
+                    audioContext = new AudioContext();
+                }
+                const actualRate = audioContext.sampleRate;
+
+                const title = (document.getElementById('meeting-title').value || '').trim() || '实时会议';
+                const startResponse = await fetch(`${API_BASE}/realtime/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        language: 'zh',
+                        sample_rate: actualRate,
+                        meeting_title: title,
+                        enable_compliance: true
+                    })
+                });
+                const startPayload = await startResponse.json().catch(() => ({}));
+                if (!startResponse.ok || startPayload.code !== 200) {
+                    throw new Error(startPayload.message || '会话创建失败');
+                }
+                realtimeSessionId = startPayload.data.session_id;
+                console.log('实时转写会话:', realtimeSessionId, '采样率', actualRate);
+
                 const source = audioContext.createMediaStreamSource(mediaStream);
-                const processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-                processor.onaudioprocess = (e) => {
-                    const inputData = e.inputBuffer.getChannelData(0);
-                    // 转为16位PCM
-                    const pcmData = new Int16Array(inputData.length);
-                    for (let i = 0; i < inputData.length; i++) {
-                        pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
-                    }
-
-                    // Base64编码
-                    const bytes = new Uint8Array(pcmData.buffer);
-                    let binary = '';
-                    for (let i = 0; i < bytes.length; i++) {
-                        binary += String.fromCharCode(bytes[i]);
-                    }
-                    const base64 = btoa(binary);
-
-                    socket.emit('audio_chunk', { audio: base64 });
+                audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+                audioProcessor.onaudioprocess = (e) => {
+                    if (!realtimeSessionId) return;
+                    realtimeChunkQueue.push(pcmToBase64(e.inputBuffer.getChannelData(0)));
                 };
+                source.connect(audioProcessor);
+                // ScriptProcessor 需要连到 destination 才会持续触发回调；
+                // 用 0 增益避免把自己的声音放出来（否则会造成回授啸叫）。
+                const silentGain = audioContext.createGain();
+                silentGain.gain.value = 0;
+                audioProcessor.connect(silentGain);
+                silentGain.connect(audioContext.destination);
 
-                source.connect(processor);
-                processor.connect(audioContext.destination);
+                // 定时把队列里的音频块发上去（避免每个 4096 帧回调都发一次请求）
+                realtimeTimer = setInterval(flushRealtimeQueue, REALTIME_CHUNK_MS);
 
                 document.getElementById('realtime-start-btn').disabled = true;
                 document.getElementById('realtime-stop-btn').disabled = false;
+                document.getElementById('realtime-status').textContent = '录音中';
+                document.getElementById('realtime-status').style.color = '#52c41a';
                 document.getElementById('recording-indicator').style.display = 'inline';
-
             } catch (error) {
-                alert('实时转写启动失败: ' + error.message);
+                releaseAudio();
+                resetRealtimeButtons();
+                let hint = '';
+                if (error && (error.name === 'NotAllowedError' || error.name === 'SecurityError')) {
+                    hint = '\n\n请检查浏览器是否允许麦克风权限；并且需通过 http://127.0.0.1 或 localhost 访问本页面。';
+                } else if (error && error.name === 'NotFoundError') {
+                    hint = '\n\n未检测到麦克风设备，请检查系统默认输入设备。';
+                }
+                alert('实时转写启动失败: ' + (error && error.message ? error.message : error) + hint);
                 console.error(error);
             }
         }
 
-        function stopRealtime() {
-            if (mediaRecorder) {
-                mediaRecorder.stop();
-            }
-            if (mediaStream) {
-                mediaStream.getTracks().forEach(t => t.stop());
-            }
-            if (audioContext) {
-                audioContext.close();
-                audioContext = null;
-            }
-            if (socket) {
-                socket.emit('stop_transcription');
-            }
+        async function stopRealtime() {
+            const sessionId = realtimeSessionId;
+            // 先停止采集，避免停止后残余音频继续上传
+            releaseAudio();
+            realtimeSessionId = null;
 
             document.getElementById('realtime-start-btn').disabled = true;
             document.getElementById('realtime-stop-btn').disabled = true;
             document.getElementById('realtime-status').textContent = '分析中...';
             document.getElementById('realtime-status').style.color = '#faad14';
             document.getElementById('recording-indicator').style.display = 'none';
+
+            if (!sessionId) {
+                resetRealtimeButtons();
+                return;
+            }
+
+            const loading = document.getElementById('loading');
+            loading.classList.add('show');
+            document.getElementById('analysis-progress-bar').style.width = '0%';
+            document.getElementById('analysis-progress-text').textContent = '准备分析...';
+            document.getElementById('analysis-progress-percent').textContent = '0%';
+
+            try {
+                const response = await fetch(`${API_BASE}/realtime/stop`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok || payload.code !== 200) {
+                    throw new Error(payload.message || '停止失败');
+                }
+            } catch (error) {
+                loading.classList.remove('show');
+                resetRealtimeButtons();
+                alert('停止实时转写失败: ' + (error.message || error));
+                return;
+            }
+
+            // 轮询分析进度与最终结果
+            const deadline = Date.now() + REALTIME_STOP_TIMEOUT;
+            realtimePollTimer = setInterval(async () => {
+                if (Date.now() > deadline) {
+                    clearInterval(realtimePollTimer);
+                    realtimePollTimer = null;
+                    loading.classList.remove('show');
+                    resetRealtimeButtons();
+                    alert('分析超时，请稍后在「历史会议」中查看结果。');
+                    return;
+                }
+                try {
+                    const resp = await fetch(`${API_BASE}/realtime/result/${sessionId}`);
+                    if (!resp.ok) {
+                        return;
+                    }
+                    const data = (await resp.json()).data || {};
+                    if (typeof data.progress === 'number') {
+                        document.getElementById('analysis-progress-bar').style.width =
+                            Math.max(0, data.progress) + '%';
+                        document.getElementById('analysis-progress-percent').textContent =
+                            Math.max(0, data.progress) + '%';
+                    }
+                    if (data.message) {
+                        document.getElementById('analysis-progress-text').textContent = data.message;
+                    }
+
+                    if (data.status === 'failed') {
+                        clearInterval(realtimePollTimer);
+                        realtimePollTimer = null;
+                        loading.classList.remove('show');
+                        resetRealtimeButtons();
+                        alert('分析失败: ' + (data.message || '未知原因'));
+                        return;
+                    }
+                    if (data.status !== 'done') {
+                        return;
+                    }
+
+                    clearInterval(realtimePollTimer);
+                    realtimePollTimer = null;
+                    loading.classList.remove('show');
+                    resetRealtimeButtons();
+
+                    if (data.result) {
+                        document.getElementById('result-section').style.display = 'block';
+                        renderResult(data.result);
+                        loadMeetingList();
+                        if (data.meeting_id) {
+                            currentMeetingId = data.meeting_id;
+                        }
+                    }
+                } catch (error) {
+                    console.error('查询实时分析结果失败:', error);
+                }
+            }, 2000);
         }
 
+        // 页面关闭时通知后端清理临时会话与音频
+        window.addEventListener('beforeunload', () => {
+            if (realtimeSessionId && navigator.sendBeacon) {
+                navigator.sendBeacon(`${API_BASE}/realtime/discard`,
+                    new Blob([JSON.stringify({ session_id: realtimeSessionId })],
+                             { type: 'application/json' }));
+            }
+        });
+
         function formatTime(seconds) {
-            const m = Math.floor(seconds / 60);
-            const s = Math.floor(seconds % 60);
+            const total = Number.isFinite(Number(seconds)) ? Number(seconds) : 0;
+            const m = Math.floor(total / 60);
+            const s = Math.floor(total % 60);
             return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
         }
 
@@ -924,11 +1149,11 @@
             document.getElementById('edit-meeting-summary').value = data.summary || '';
             document.getElementById('edit-meeting-score').value = data.total_score || '';
 
-            document.getElementById('edit-meeting-modal').style.display = 'block';
+            document.getElementById('edit-meeting-modal').classList.add('show');
         }
 
         function closeEditMeetingModal() {
-            document.getElementById('edit-meeting-modal').style.display = 'none';
+            document.getElementById('edit-meeting-modal').classList.remove('show');
         }
 
         async function saveMeetingEdit() {
@@ -958,15 +1183,20 @@
         async function loadMeetingList() {
             const response = await fetch(`${API_BASE}/meetings?page_size=100`);
             const result = await response.json();
-            
+            const meetings = result.data || [];
+
             const tbody = document.getElementById('meeting-list');
-            tbody.innerHTML = result.data.map(m => `
+            if (meetings.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="color:#999;">暂无会议记录</td></tr>';
+                return;
+            }
+            tbody.innerHTML = meetings.map(m => `
                 <tr>
                     <td>${m.id}</td>
                     <td>${m.title}</td>
                     <td>${new Date(m.date).toLocaleString()}</td>
-                    <td>${Math.round(m.duration / 60)}分钟</td>
-                    <td>${m.total_score ? `<span class="score-badge score-${getScoreClass(m.score_level)}">${m.total_score}</span>` : '--'}</td>
+                    <td>${Math.round((m.duration || 0) / 60)}分钟</td>
+                    <td>${m.total_score != null ? `<span class="score-badge score-${getScoreClass(m.score_level)}">${m.total_score}</span>` : '--'}</td>
                     <td>${m.status === 'finished' ? '已完成' : m.status === 'processing' ? '处理中' : '失败'}</td>
                     <td>
                         <div class="actions">
@@ -977,12 +1207,18 @@
                     </td>
                 </tr>
             `).join('');
+
+            const totalEl = document.getElementById('meeting-total');
+            if (totalEl && typeof result.total === 'number') {
+                totalEl.textContent = `共 ${result.total} 场会议`;
+            }
         }
 
         async function viewMeeting(id) {
             const response = await fetch(`${API_BASE}/meetings/${id}`);
             const result = await response.json();
-            const data = result.data;
+            const data = result.data || {};
+            currentMeetingId = data.id || id;
 
             document.getElementById('modal-title').textContent = data.title;
 
@@ -1122,17 +1358,23 @@
         }
 
         async function loadKnowledgeList() {
-            const response = await fetch(`${API_BASE}/knowledge-base`);
+            // page_size=100：不传的话后端默认只返回 10 条，条目一多就会「消失」
+            const response = await fetch(`${API_BASE}/knowledge-base?page_size=100`);
             const result = await response.json();
-            
+            const items = result.data || [];
+
             const tbody = document.getElementById('knowledge-list');
-            tbody.innerHTML = result.data.map(item => `
+            if (items.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="color:#999;">暂无知识库条目</td></tr>';
+                return;
+            }
+            tbody.innerHTML = items.map(item => `
                 <tr>
                     <td>${item.id}</td>
                     <td>${item.title}</td>
                     <td>${getTypeName(item.item_type)}</td>
-                    <td>${item.keywords.slice(0, 3).join(', ')}</td>
-                    <td>${item.required_points.slice(0, 3).join(', ')}</td>
+                    <td>${(item.keywords || []).slice(0, 3).join(', ')}</td>
+                    <td>${(item.required_points || []).slice(0, 3).join(', ')}</td>
                     <td>${item.status === 'active' ? '启用' : '禁用'}</td>
                     <td>
                         <div class="actions">
@@ -1142,6 +1384,11 @@
                     </td>
                 </tr>
             `).join('');
+
+            const totalEl = document.getElementById('kb-total');
+            if (totalEl && typeof result.total === 'number') {
+                totalEl.textContent = `共 ${result.total} 条`;
+            }
         }
 
         function getTypeName(type) {
@@ -1153,15 +1400,20 @@
             const q = document.getElementById('kb-search').value;
             const response = await fetch(`${API_BASE}/knowledge-base/search?q=${encodeURIComponent(q)}`);
             const result = await response.json();
-            
+            const items = result.data || [];
+
             const tbody = document.getElementById('knowledge-list');
-            tbody.innerHTML = result.data.map(item => `
+            if (items.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="color:#999;">没有匹配的条目</td></tr>';
+                return;
+            }
+            tbody.innerHTML = items.map(item => `
                 <tr>
                     <td>${item.id}</td>
                     <td>${item.title}</td>
                     <td>${getTypeName(item.item_type)}</td>
-                    <td>${item.keywords.slice(0, 3).join(', ')}</td>
-                    <td>${item.required_points.slice(0, 3).join(', ')}</td>
+                    <td>${(item.keywords || []).slice(0, 3).join(', ')}</td>
+                    <td>${(item.required_points || []).slice(0, 3).join(', ')}</td>
                     <td>${item.status === 'active' ? '启用' : '禁用'}</td>
                     <td>
                         <div class="actions">
@@ -1228,38 +1480,54 @@
         }
 
         async function loadReports() {
-            const response = await fetch(`${API_BASE}/meetings`);
+            // page_size=100 + include_compliance=1：
+            //   不传 page_size 只会统计最近 10 场；不传 include_compliance 则拿不到
+            //   遗漏要点/风险内容（这些只在合规报告里，会议列表默认不返回）。
+            const response = await fetch(`${API_BASE}/meetings?page_size=100&include_compliance=1`);
             const result = await response.json();
-            
+            const meetings = result.data || [];
+
             let excellent = 0, good = 0, pass = 0, fail = 0;
-            const tbody = document.getElementById('report-list');
-            
-            tbody.innerHTML = result.data.map(m => {
-                if (!m.total_score) return '';
+            const rows = [];
+
+            meetings.forEach(m => {
+                // 只有出了评分的会议才计入统计（0 分与「未评分」要区分：
+                // 后端用 None 表示未评分，用 0 表示确实得了 0 分）
+                if (m.total_score === null || m.total_score === undefined) return;
                 if (m.total_score >= 90) excellent++;
                 else if (m.total_score >= 75) good++;
                 else if (m.total_score >= 60) pass++;
                 else fail++;
-                
-                return `
+
+                const summary = m.compliance_summary || {};
+                rows.push(`
                     <tr>
                         <td>${m.id}</td>
                         <td>${m.title}</td>
                         <td><span class="score-badge score-${getScoreClass(m.score_level)}">${m.total_score}</span></td>
-                        <td>${m.score_level}</td>
-                        <td>${m.compliance_report?.missing_points?.length || 0}</td>
-                        <td>${m.compliance_report?.risk_keywords?.length || 0}</td>
-                        <td>${m.compliance_report?.suggestions?.[0] || '--'}</td>
+                        <td>${m.score_level || '--'}</td>
+                        <td>${summary.missing_points_count ?? '--'}</td>
+                        <td>${summary.risk_keywords_count ?? '--'}</td>
+                        <td>${summary.first_suggestion || '--'}</td>
                         <td>${new Date(m.created_at).toLocaleString()}</td>
                         <td><button class="btn btn-primary btn-sm" onclick="viewMeeting(${m.id})">查看详情</button></td>
                     </tr>
-                `;
-            }).join('');
-            
+                `);
+            });
+
+            const tbody = document.getElementById('report-list');
+            tbody.innerHTML = rows.length ? rows.join('')
+                : '<tr><td colspan="9" style="color:#999;">暂无已评分的会议</td></tr>';
+
             document.getElementById('stat-excellent').textContent = excellent;
             document.getElementById('stat-good').textContent = good;
             document.getElementById('stat-pass').textContent = pass;
             document.getElementById('stat-fail').textContent = fail;
+
+            const totalEl = document.getElementById('report-total');
+            if (totalEl) {
+                totalEl.textContent = `共 ${result.total ?? meetings.length} 场会议，已评分 ${rows.length} 场`;
+            }
         }
 
         async function loadSettings() {
@@ -1323,34 +1591,43 @@
             try {
                 const response = await fetch(`${API_BASE}/hardware/status`);
                 const result = await response.json();
-                const data = result.data;
-                
+                const data = result.data || {};
+
+                // 后端在检测失败时会把设备列表置为字符串（如 ['无法检测']），
+                // 这里必须按类型区分，否则页面会渲染出一堆 undefined。
+                const renderDevices = (list, bg, withRate) => {
+                    const items = list || [];
+                    if (items.length === 0) return '<p style="color:#999;">未检测到设备</p>';
+                    return items.map(d => {
+                        if (typeof d === 'string') {
+                            return `<div style="background:#fff1f0; padding:8px; margin:4px 0; border-radius:4px; color:#ff4d4f;">${d}</div>`;
+                        }
+                        return `
+                            <div style="background:${bg}; padding:8px; margin:4px 0; border-radius:4px;">
+                                <span style="font-weight:600;">${d.name}</span>
+                                <span style="margin-left:8px; color:#999;">ID:${d.id} | 通道:${d.channels}${withRate && d.sample_rate ? ` | 采样率:${d.sample_rate}Hz` : ''}</span>
+                            </div>`;
+                    }).join('');
+                };
+
                 let html = `<div style="margin-bottom:16px;">
                     <h4 style="font-size:14px; margin-bottom:8px;">系统信息</h4>
-                    <p>操作系统: ${data.system}</p>
-                    <p>平台: ${data.platform}</p>
+                    <p>操作系统: ${data.system || '--'}</p>
+                    <p>平台: ${data.platform || '--'}</p>
                 </div>`;
-                
+
+                const mics = data.microphones || [];
+                const speakers = data.speakers || [];
                 html += `<div style="margin-bottom:16px;">
-                    <h4 style="font-size:14px; margin-bottom:8px;">麦克风设备 (${data.microphones.length}个)</h4>
-                    ${data.microphones.length > 0 ? data.microphones.map(m => `
-                        <div style="background:#f6ffed; padding:8px; margin:4px 0; border-radius:4px;">
-                            <span style="font-weight:600;">${m.name}</span>
-                            <span style="margin-left:8px; color:#999;">ID:${m.id} | 通道:${m.channels} | 采样率:${m.sample_rate}Hz</span>
-                        </div>
-                    `).join('') : '<p style="color:#999;">未检测到麦克风</p>'}
+                    <h4 style="font-size:14px; margin-bottom:8px;">麦克风设备 (${mics.length}个)</h4>
+                    ${renderDevices(mics, '#f6ffed', true)}
                 </div>`;
-                
+
                 html += `<div style="margin-bottom:16px;">
-                    <h4 style="font-size:14px; margin-bottom:8px;">扬声器设备 (${data.speakers.length}个)</h4>
-                    ${data.speakers.length > 0 ? data.speakers.map(s => `
-                        <div style="background:#e6f7ff; padding:8px; margin:4px 0; border-radius:4px;">
-                            <span style="font-weight:600;">${s.name}</span>
-                            <span style="margin-left:8px; color:#999;">ID:${s.id} | 通道:${s.channels}</span>
-                        </div>
-                    `).join('') : '<p style="color:#999;">未检测到扬声器</p>'}
+                    <h4 style="font-size:14px; margin-bottom:8px;">扬声器设备 (${speakers.length}个)</h4>
+                    ${renderDevices(speakers, '#e6f7ff', false)}
                 </div>`;
-                
+
                 if (data.camera) {
                     html += `<div>
                         <h4 style="font-size:14px; margin-bottom:8px;">摄像头</h4>
@@ -1421,9 +1698,11 @@
             select.innerHTML = '<option value="">使用默认麦克风</option>';
 
             try {
-                // 先请求权限，否则设备标签可能为空
-                await navigator.mediaDevices.getUserMedia({ audio: true });
+                // 先请求一次权限，否则设备标签可能为空；拿到列表后立刻释放，
+                // 否则页面一打开就一直占用麦克风（浏览器常驻录音标记）。
+                const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 const devices = await navigator.mediaDevices.enumerateDevices();
+                tempStream.getTracks().forEach(t => t.stop());
                 const audioInputs = devices.filter(d => d.kind === 'audioinput');
 
                 audioInputs.forEach((device, index) => {

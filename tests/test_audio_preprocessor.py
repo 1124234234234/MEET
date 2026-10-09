@@ -1,9 +1,14 @@
-"""
+﻿"""
 音频预处理模块测试
 """
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+# 统一以「本文件所在目录」为基准定位测试音频：
+# 旧实现用相对路径，从项目根目录运行时会在根目录下找 test_audio_files 而报
+# 「测试文件不存在」，测试结果取决于当前工作目录。
+AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_audio_files')
 
 import numpy as np
 import librosa
@@ -15,18 +20,27 @@ from modules.audio_preprocessor import (
 )
 
 
+def _test_audio_path():
+    """返回一个可用于预处理测试的真实语音文件。"""
+    for name in ('multi_speaker.wav', 'gt_2spk.wav', 'compliant_meeting.wav', 'noisy.wav'):
+        path = os.path.join(AUDIO_DIR, name)
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def test_preprocess_audio():
     """测试完整预处理流程"""
     print("=" * 60)
     print("测试: 完整音频预处理流程")
     print("=" * 60)
     
-    test_file = os.path.join('test_audio_files', 'multi_speaker.wav')
+    test_file = _test_audio_path()
     if not os.path.exists(test_file):
         print(f"❌ 测试文件不存在: {test_file}")
         return False
     
-    output_file = 'test_output_processed.wav'
+    output_file = os.path.join(AUDIO_DIR, 'test_output_processed.wav')
     
     try:
         y, sr = preprocess_audio(test_file, output_file)
@@ -57,7 +71,7 @@ def test_noise_reduction():
     print("测试: 降噪功能")
     print("=" * 60)
     
-    test_file = os.path.join('test_audio_files', 'multi_speaker.wav')
+    test_file = _test_audio_path()
     if not os.path.exists(test_file):
         print(f"❌ 测试文件不存在: {test_file}")
         return False
@@ -194,7 +208,7 @@ def test_vad():
     print("测试: 语音活动检测(VAD)")
     print("=" * 60)
     
-    test_file = os.path.join('test_audio_files', 'multi_speaker.wav')
+    test_file = _test_audio_path()
     if not os.path.exists(test_file):
         print(f"❌ 测试文件不存在: {test_file}")
         return False
@@ -221,13 +235,13 @@ def test_audio_quality_report():
     print("测试: 音频质量报告")
     print("=" * 60)
     
-    test_file = os.path.join('test_audio_files', 'multi_speaker.wav')
+    test_file = _test_audio_path()
     if not os.path.exists(test_file):
         print(f"❌ 测试文件不存在: {test_file}")
         return False
     
     try:
-        processed_file = 'test_processed.wav'
+        processed_file = os.path.join(AUDIO_DIR, 'test_processed.wav')
         preprocess_audio(test_file, processed_file)
         
         report = get_audio_quality_report(test_file, processed_file)
@@ -276,3 +290,4 @@ if __name__ == '__main__':
         print(f"{status:8} - {name}")
     
     print(f"\n总计: {passed}/{total} 通过 ({passed/total*100:.1f}%)")
+    sys.exit(0 if passed == total else 1)

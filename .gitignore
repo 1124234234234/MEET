@@ -34,3 +34,13 @@ models/
 temp_*.mp3
 temp_*.wav
 测试音频文件.txt
+
+# 会议录音与视频（含个人隐私信息，不纳入版本控制）
+*.m4a
+*.aac
+*.mp4
+*.webm
+*.flac
+*.ogg
+*.amr
+*.wma

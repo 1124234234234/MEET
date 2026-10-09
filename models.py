@@ -15,6 +15,11 @@ class Meeting(db.Model):
     keywords = db.Column(db.Text)
     topics = db.Column(db.Text)
     sentiment = db.Column(db.Text)
+    # 结构化会议纪要：待办事项与决议结论（对应需求「自动提取待办事项和决议结论」）
+    action_items = db.Column(db.Text)
+    decisions = db.Column(db.Text)
+    # 音频质量报告（降噪量 / 处理前后信噪比），JSON
+    audio_quality = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, onupdate=datetime.now)
 
@@ -30,12 +35,15 @@ class Meeting(db.Model):
             'duration': int(self.duration) if self.duration else 0,
             'status': self.status,
             'audio_path': self.audio_path,
-            'total_score': float(self.total_score) if self.total_score else None,
+            'total_score': float(self.total_score) if self.total_score is not None else None,
             'score_level': self.score_level,
             'summary': self.summary or '',
             'keywords': json.loads(self.keywords) if self.keywords else [],
             'topics': json.loads(self.topics) if self.topics else [],
             'sentiment': json.loads(self.sentiment) if self.sentiment else {},
+            'action_items': json.loads(self.action_items) if self.action_items else [],
+            'decisions': json.loads(self.decisions) if self.decisions else [],
+            'audio_quality': json.loads(self.audio_quality) if self.audio_quality else None,
             'created_at': self.created_at.isoformat()
         }
 
@@ -104,7 +112,7 @@ class ComplianceReport(db.Model):
         return {
             'id': self.id,
             'meeting_id': self.meeting_id,
-            'total_score': float(self.total_score) if self.total_score else 0,
+            'total_score': float(self.total_score) if self.total_score is not None else 0,
             'score_level': self.score_level,
             'detailed_scores': json.loads(self.detailed_scores) if self.detailed_scores else {},
             'missing_points': json.loads(self.missing_points) if self.missing_points else [],

@@ -1,32 +1,36 @@
 @echo off
 chcp 65001 >nul
-echo ========================================
-echo   项目备份脚本
-echo ========================================
+title Meeting Compliance Analysis System - Backup
+cd /d "%~dp0"
+
+REM ASCII-only on purpose: cmd.exe cannot reliably parse UTF-8 .bat files,
+REM Chinese characters shift the parser and break the script.
+REM Chinese messages are kept minimal and printed via ASCII-safe text.
+
+set "BACKUP_DIR=backup"
+set "TIMESTAMP=%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%%time:~6,2%"
+set "TIMESTAMP=%TIMESTAMP: =0%"
+set "BACKUP_NAME=voice-reco_backup_%TIMESTAMP%.zip"
+
+echo ============================================================
+echo   Project backup
+echo ============================================================
 echo.
 
-set BACKUP_DIR=backup
-set TIMESTAMP=%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%%time:~6,2%
-set TIMESTAMP=%TIMESTAMP: =0%
-set BACKUP_NAME=voice-reco_backup_%TIMESTAMP%.zip
+if not exist "%BACKUP_DIR%" mkdir "%BACKUP_DIR%"
 
-if not exist "%BACKUP_DIR%" (
-    mkdir "%BACKUP_DIR%"
-)
-
-echo [信息] 正在创建备份: %BACKUP_NAME%
+echo [INFO] Creating: %BACKUP_DIR%\%BACKUP_NAME%
+echo        (skipping models/ ~5GB, backup/, uploads/, __pycache__, .git)
 echo.
 
-powershell -Command "Compress-Archive -Path * -DestinationPath '%BACKUP_DIR%\%BACKUP_NAME%' -Force -CompressionLevel Optimal"
+powershell -NoProfile -Command "Compress-Archive -Path (Get-ChildItem -Path * -Exclude 'models','backup','uploads','__pycache__','.git' -ErrorAction SilentlyContinue) -DestinationPath '%BACKUP_DIR%\%BACKUP_NAME%' -Force -CompressionLevel Optimal"
 
-if %errorlevel% equ 0 (
-    echo.
-    echo ========================================
-    echo   备份成功！
-    echo   文件: %BACKUP_DIR%\%BACKUP_NAME%
-    echo ========================================
+if errorlevel 1 (
+    echo [ERROR] Backup failed.
 ) else (
-    echo [错误] 备份失败
+    echo ============================================================
+    echo   Backup done: %BACKUP_DIR%\%BACKUP_NAME%
+    echo ============================================================
 )
 
 echo.

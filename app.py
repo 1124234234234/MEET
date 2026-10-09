@@ -2,65 +2,19 @@ import os
 import json
 import uuid
 import threading
-import numpy as np
-import soundfile as sf
-from scipy.signal import resample_poly
-from math import gcd
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO
-import whisper
-import ssl
-
-ssl._create_default_https_context = ssl._create_unverified_context
-
-
-def _resample_audio(y, orig_sr, target_sr):
-    """用 scipy 重采样，避免 librosa 的 numba 问题"""
-    if orig_sr == target_sr:
-        return y
-    g = gcd(int(orig_sr), int(target_sr))
-    up = int(target_sr // g)
-    down = int(orig_sr // g)
-    return resample_poly(y, up, down).astype(np.float32)
-
-
-def _load_audio_soundfile(file, sr=16000):
-    """加载音频：soundfile 直接读，读不了的格式用 imageio-ffmpeg"""
-    try:
-        y, orig_sr = sf.read(file, always_2d=False, dtype='float32')
-        if y.ndim > 1:
-            y = y.mean(axis=1)
-        y = y.astype(np.float32)
-        if orig_sr != sr:
-            y = _resample_audio(y, orig_sr, sr)
-        return y
-    except Exception:
-        try:
-            import imageio_ffmpeg
-            import subprocess
-            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-            cmd = [
-                ffmpeg_exe, '-nostdin', '-threads', '0',
-                '-i', file, '-f', 's16le', '-ac', '1',
-                '-acodec', 'pcm_s16le', '-ar', str(sr), '-'
-            ]
-            result = subprocess.run(cmd, capture_output=True, check=True)
-            audio_data = np.frombuffer(result.stdout, dtype=np.int16)
-            return audio_data.astype(np.float32) / 32768.0
-        except Exception as e:
-            raise RuntimeError(f"无法加载音频文件: {e}")
-
-
-import whisper.audio
-whisper.audio.load_audio = _load_audio_soundfile
-
 
 app = Flask(__name__)
 app.config.from_object('config.Config')
-CORS(app)
+CORS(app, origins=app.config.get('CORS_ORIGINS') or '*')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+if app.config.get('TRUST_PROXY'):
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # 分析进度存储
 analysis_progress = {}
@@ -70,48 +24,73 @@ from database import db
 db.init_app(app)
 
 from models import Meeting, Transcription, KnowledgeBase, ComplianceReport, ScoreWeight
-from modules.audio_preprocessor import preprocess_audio, format_time, detect_speech_segments, get_audio_quality_report
-from modules.speaker_diarization import speaker_diarization_simple
-from modules.text_analyzer import extract_keywords, analyze_topic, generate_summary, analyze_sentiment
-from modules.compliance_checker import calculate_compliance_score, generate_compliance_report, get_score_level
-from modules.funasr_transcriber import register_socketio_events
-from modules.meeting_detector import MeetingDetector, count_participants, analyze_participation_distribution
-from modules.report_generator import generate_meeting_summary_report, generate_compliance_trend_report, generate_report_html
+from modules.meeting_detector import count_participants, analyze_participation_distribution
+from modules import meeting_store
 
-whisper_model = None
-whisper_model_realtime = None
+# 实时转写的 Socket.IO 事件必须在模块导入时就注册。
+# 旧实现把注册放在 __main__ 分支里，导致用 flask run / gunicorn / 其它启动器
+# 启动时实时转写完全不可用（连接成功但没有任何事件处理器）。
+from modules.funasr_transcriber import register_socketio_events
+register_socketio_events(socketio)
+
+# 语音识别与模型加载：统一走 asr_engine（FunASR 优先，Whisper 自动兜底）
+_engine_lock = threading.Lock()
+_engine_ready = {'asr': False, 'vad': False}
+
+
+def init_asr_models():
+    """预加载语音识别相关模型（幂等）。"""
+    from modules import asr_engine
+
+    with _engine_lock:
+        if not _engine_ready['asr']:
+            engine = asr_engine.get_engine('auto')
+            _engine_ready['asr'] = True
+            print(f'[启动] 语音识别引擎就绪: {engine.name}')
+        if not _engine_ready['vad']:
+            from modules import model_registry
+
+            model_registry.get_vad_model()
+            _engine_ready['vad'] = True
+    return True
+
 
 def init_whisper_model():
-    """加载上传分析用的模型（medium，准确度优先）"""
-    global whisper_model
-    if whisper_model is None:
-        model_name = app.config['WHISPER_MODEL']
-        print(f'Initializing Whisper model ({model_name}) for upload analysis...')
-        try:
-            whisper_model = whisper.load_model(model_name)
-            print(f'Whisper {model_name} model loaded successfully')
-        except Exception as e:
-            print(f'Failed to load {model_name}: {e}')
-            print('Loading small model as fallback...')
-            whisper_model = whisper.load_model('small')
-            print('Whisper small model loaded')
+    """兼容旧调用点：返回当前识别引擎。"""
+    from modules import asr_engine
 
-def init_whisper_model_realtime():
-    """加载实时转写用的模型（small，速度优先）"""
-    global whisper_model_realtime
-    if whisper_model_realtime is None:
-        model_name = app.config['WHISPER_MODEL_REALTIME']
-        print(f'Initializing Whisper model ({model_name}) for realtime transcription...')
-        try:
-            whisper_model_realtime = whisper.load_model(model_name)
-            print(f'Whisper {model_name} model loaded successfully')
-        except Exception as e:
-            print(f'Failed to load {model_name}: {e}')
-            whisper_model_realtime = whisper.load_model('tiny')
-            print('Whisper tiny model loaded')
+    return asr_engine.get_engine('auto')
+
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+
+
+def parse_bool(value, default=False):
+    """解析布尔参数（表单里可能是 'true'/'false'/'1'/'0' 字符串）。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def clamp_page_size(value):
+    """限制分页大小，避免一次拉取过多数据。"""
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        size = 10
+    return max(1, min(size, app.config.get('MAX_PAGE_SIZE', 100)))
+
+
+def resolve_score_weights():
+    """读取评分权重：数据库优先，其次配置默认值。"""
+    weights = {}
+    for weight in ScoreWeight.query.all():
+        weights[weight.weight_name] = weight.weight_value
+    return weights or dict(app.config['SCORE_WEIGHTS'])
+
 
 @app.route('/')
 def index():
@@ -119,23 +98,79 @@ def index():
 
 @app.route('/api/health')
 def health():
-    return jsonify({'status': 'ok', 'message': 'API service is running'})
+    """健康检查：附带本地模型可用性，便于启动脚本判断服务是否真正就绪。"""
+    from modules import model_registry
+
+    return jsonify({
+        'status': 'ok',
+        'message': 'API service is running',
+        'models': model_registry.status(),
+    })
 
 @app.route('/api/meetings', methods=['GET'])
 def get_meetings():
     page = request.args.get('page', 1, type=int)
-    page_size = request.args.get('page_size', 10, type=int)
+    page_size = clamp_page_size(request.args.get('page_size', 10))
     status = request.args.get('status')
-    
+    min_score = request.args.get('min_score', type=float)
+    max_score = request.args.get('max_score', type=float)
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    include_compliance = parse_bool(request.args.get('include_compliance'), default=False)
+
     query = Meeting.query
     if status:
         query = query.filter_by(status=status)
-    
-    meetings = query.order_by(Meeting.created_at.desc()).paginate(page=page, per_page=page_size)
-    
+    if min_score is not None:
+        query = query.filter(Meeting.total_score >= min_score)
+    if max_score is not None:
+        query = query.filter(Meeting.total_score <= max_score)
+    if start_date:
+        try:
+            query = query.filter(Meeting.date >= datetime.fromisoformat(start_date))
+        except ValueError:
+            return jsonify({'code': 400, 'message': 'start_date 格式应为 YYYY-MM-DD'}), 400
+    if end_date:
+        try:
+            # 含当天：取结束日期次日零点为上界
+            query = query.filter(Meeting.date < datetime.fromisoformat(end_date) + timedelta(days=1))
+        except ValueError:
+            return jsonify({'code': 400, 'message': 'end_date 格式应为 YYYY-MM-DD'}), 400
+
+    meetings = query.order_by(Meeting.created_at.desc()).paginate(
+        page=page, per_page=page_size, error_out=False
+    )
+
+    items = [m.to_dict() for m in meetings.items]
+
+    if include_compliance and items:
+        # 一次性把本页会议的合规摘要带出来，避免前端逐条再请求（N+1）。
+        # 列表页需要「遗漏要点数 / 风险内容数 / 建议」，这些只在合规报告里。
+        ids = [item['id'] for item in items]
+        reports = {
+            report.meeting_id: report
+            for report in ComplianceReport.query.filter(
+                ComplianceReport.meeting_id.in_(ids)
+            ).all()
+        }
+        for item in items:
+            report = reports.get(item['id'])
+            if report is None:
+                item['compliance_summary'] = None
+                continue
+            missing = json.loads(report.missing_points) if report.missing_points else []
+            risks = json.loads(report.risk_keywords) if report.risk_keywords else []
+            suggestions = json.loads(report.suggestions) if report.suggestions else []
+            item['compliance_summary'] = {
+                'missing_points_count': len(missing),
+                'risk_keywords_count': len(risks),
+                'suggestions_count': len(suggestions),
+                'first_suggestion': suggestions[0] if suggestions else None,
+            }
+
     return jsonify({
         'code': 200,
-        'data': [m.to_dict() for m in meetings.items],
+        'data': items,
         'total': meetings.total,
         'page': page,
         'page_size': page_size
@@ -155,212 +190,242 @@ def get_meeting(meeting_id):
 
 @app.route('/api/meetings', methods=['POST'])
 def create_meeting():
-    print('create_meeting called')
     if 'audio_file' not in request.files:
         return jsonify({'code': 400, 'message': 'No audio file provided'}), 400
-    
+
     audio_file = request.files['audio_file']
-    print(f'Got audio file: {audio_file.filename}')
     if audio_file.filename == '':
-        return jsonify({'code': 400, 'message': 'No audio file selected'}), 400
-    
+        return jsonify({'code': 400, 'message': '未选择音频文件'}), 400
+
     if not allowed_file(audio_file.filename):
-        return jsonify({'code': 400, 'message': 'File type not allowed'}), 400
-    
-    meeting_title = request.form.get('meeting_title', '未命名会议')
-    enable_diarization = request.form.get('enable_diarization', 'false').lower() == 'true'
-    enable_compliance = request.form.get('enable_compliance', 'true').lower() == 'true'
+        return jsonify({
+            'code': 400,
+            'message': f'不支持的文件类型，支持：{", ".join(sorted(app.config["ALLOWED_EXTENSIONS"]))}',
+        }), 400
+
+    meeting_title = (request.form.get('meeting_title') or '未命名会议').strip()
+    enable_diarization = parse_bool(request.form.get('enable_diarization'), default=True)
+    enable_compliance = parse_bool(request.form.get('enable_compliance'), default=True)
 
     file_ext = audio_file.filename.rsplit('.', 1)[1].lower()
     file_id = str(uuid.uuid4())
     original_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{file_id}_original.{file_ext}')
-    processed_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{file_id}_processed.wav')
 
-    print(f'Saving file to: {original_path}')
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     audio_file.save(original_path)
-    print('File saved')
 
-    file_size = os.path.getsize(original_path)
-    print(f'File size: {file_size} bytes')
-    if file_size < 1024:
+    # 文件过小直接拒绝，并清理已写入的临时文件，避免残留垃圾
+    if os.path.getsize(original_path) < 1024:
+        try:
+            os.remove(original_path)
+        except OSError:
+            pass
         return jsonify({'code': 400, 'message': '音频文件太小或为空，请上传有效的音频文件'}), 400
-
-    processed_path = original_path
 
     meeting = Meeting(
         title=meeting_title,
         date=datetime.now(),
         status='processing',
-        audio_path=processed_path
+        audio_path=original_path,
     )
     db.session.add(meeting)
     db.session.commit()
-    print(f'Meeting created with ID: {meeting.id}', flush=True)
 
     thread = threading.Thread(
         target=_process_meeting_async,
-        args=(meeting.id, processed_path, enable_diarization, enable_compliance)
+        args=(meeting.id, original_path, enable_diarization, enable_compliance),
+        daemon=True,
     )
-    thread.daemon = True
     thread.start()
-    print('Async thread started', flush=True)
 
     return jsonify({'code': 200, 'message': '分析已开始', 'meeting_id': meeting.id})
 
 
 def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_compliance):
-    """异步处理会议分析"""
-    import time as _time
-    import os
+    """
+    异步处理会议分析（上传音频路径）。
 
-    processed_path = audio_path.rsplit('.', 1)[0] + '_processed.wav'
+    注意：本函数运行在独立线程里，线程内没有 Flask 应用上下文，
+    因此所有数据库访问（查知识库、查评分权重、读写会议记录）都必须放在
+    `with app.app_context():` 之内，否则会抛
+    "Working outside of application context."。
+    """
+    import time as _time
 
     def update_progress(percent, message):
         analysis_progress[meeting_id] = {'progress': percent, 'message': message}
         try:
-            socketio.emit('analysis_progress', {'meeting_id': meeting_id, 'progress': percent, 'message': message})
+            socketio.emit('analysis_progress', {
+                'meeting_id': meeting_id,
+                'progress': percent,
+                'message': message,
+            })
         except Exception:
             pass
 
     try:
-        update_progress(3, '正在预处理音频...')
-        _t_pre = _time.time()
-        if enable_diarization:
-            try:
-                preprocess_audio(audio_path, processed_path)
-                if os.path.exists(processed_path):
-                    audio_path = processed_path
-                print(f'Meeting {meeting_id}: preprocessing done in {_time.time()-_t_pre:.1f}s')
-            except Exception as e:
-                print(f'Audio preprocessing failed: {e}')
+        from modules.audio_preprocessor import preprocess_audio, get_audio_quality_report
+        from modules.text_analyzer import (
+            analyze_sentiment, analyze_topic, extract_action_items,
+            extract_decisions, extract_keywords, generate_summary,
+        )
+        from modules.compliance_checker import calculate_compliance_score, get_score_level
+        from modules import asr_engine, speaker_diarization
 
-        update_progress(5, '正在初始化模型...')
-        init_whisper_model()
+        started = _time.time()
 
-        update_progress(10, '正在转写音频...')
-        print(f'Meeting {meeting_id}: starting transcription...')
-        _t0 = _time.time()
-        from modules.whisper_utils import transcribe_with_fix
-        result = transcribe_with_fix(whisper_model, audio_path, language='zh')
+        # 知识库条目（热词增强与合规比对共用）。这里单独开一次应用上下文：
+        # 线程内没有上下文，识别之前就要拿到关键词做热词。
+        with app.app_context():
+            knowledge_items = KnowledgeBase.query.filter_by(status='active').all()
+            hotwords = asr_engine.build_hotwords(knowledge_items)
+        print(f'Meeting {meeting_id}: 热词 {len(hotwords or [])} 条')
+
+        # 预处理：按信噪比自适应（干净音频走轻度处理，含噪音频才降噪，见 audio_preprocessor）
+        update_progress(5, '正在预处理音频...')
+        processed_path = audio_path.rsplit('.', 1)[0] + '_processed.wav'
+        analysis_audio = audio_path
+        preprocessing_ok = False
+        try:
+            preprocess_audio(audio_path, processed_path)
+            if os.path.exists(processed_path):
+                analysis_audio = processed_path
+                preprocessing_ok = True
+        except Exception as exc:
+            print(f'Meeting {meeting_id}: 音频预处理失败: {exc}')
+
+        update_progress(15, '正在识别语音...')
+        result = asr_engine.transcribe(analysis_audio, language='zh', hotwords=hotwords)
         full_text = result['text']
-        print(f'Meeting {meeting_id}: transcription done in {_time.time()-_t0:.1f}s, text length: {len(full_text)}')
+        print(f'Meeting {meeting_id}: 识别完成，引擎={result.get("engine")}，'
+              f'{len(result["segments"])} 句，耗时 {_time.time()-started:.1f}s')
+
+        if not full_text.strip():
+            raise RuntimeError('未识别到有效语音内容')
 
         update_progress(40, '正在进行说话人分离...')
         speaker_segments = []
         if enable_diarization:
             try:
-                _t1 = _time.time()
-                speaker_segments = speaker_diarization_simple(audio_path)
-                print(f'Meeting {meeting_id}: diarization done in {_time.time()-_t1:.1f}s')
-            except Exception as e:
-                print(f'Speaker diarization failed: {e}')
+                t0 = _time.time()
+                # 说话人分离必须用原始音频：预处理（降噪/语音增强）会改变频谱包络，
+                # 而声纹特征恰恰依赖频谱包络，实测在预处理后音频上 2 人会并成 1 人
+                # （混淆率 3.55% -> 38.53%）。预处理只用于提升识别质量。
+                speaker_segments = speaker_diarization.speaker_diarization_simple(audio_path)
+                print(f'Meeting {meeting_id}: 说话人分离耗时 {_time.time()-t0:.1f}s')
+            except Exception as exc:
+                print(f'Meeting {meeting_id}: 说话人分离失败: {exc}')
 
+        # 识别分句 → 会议转写记录（按时间重叠最大者判定说话人）
+        raw_segments = [{
+            'speaker': 'SPEAKER_00',
+            'text': seg['text'],
+            'start_time': seg['start'],
+            'end_time': seg['end'],
+            'confidence': seg.get('confidence', 1.0),
+            'language': result.get('language', 'zh'),
+        } for seg in result['segments']]
+
+        if speaker_segments:
+            raw_segments = speaker_diarization.assign_speakers_to_segments(
+                raw_segments, speaker_segments
+            )
+
+        audio_quality = None
+        if preprocessing_ok:
+            try:
+                # 对比原始音频与预处理后音频，评估降噪/增强效果
+                audio_quality = get_audio_quality_report(audio_path, processed_path)
+            except Exception as exc:
+                print(f'Meeting {meeting_id}: 音频质量报告失败: {exc}')
+
+        update_progress(55, '正在提取关键词...')
+        keywords = extract_keywords(full_text, top_n=10)
+
+        update_progress(65, '正在分析主题...')
+        topics = analyze_topic(full_text)
+
+        update_progress(75, '正在生成会议摘要...')
+        summary = generate_summary(full_text, max_length=300)
+
+        update_progress(80, '正在提取待办事项与决议...')
+        action_items = extract_action_items(full_text)
+        decisions = extract_decisions(full_text)
+
+        sentiment = analyze_sentiment(full_text)
+
+        duration = int(max((s.get('end_time') or 0) for s in raw_segments)) if raw_segments else 0
+
+        # 数据库相关操作统一放在应用上下文中（线程内默认没有上下文）
         with app.app_context():
             meeting = Meeting.query.get(meeting_id)
             if not meeting:
-                print(f'Meeting {meeting_id}: not found, aborting')
+                print(f'Meeting {meeting_id}: 记录不存在，终止')
                 return
-
-            # 保存转写段落
-            for segment in result['segments']:
-                speaker = 'SPEAKER_00'
-                if speaker_segments:
-                    for ss in speaker_segments:
-                        if ss['start'] <= segment['start'] <= ss['end']:
-                            speaker = ss['speaker']
-                            break
-
-                transcription = Transcription(
-                    meeting_id=meeting.id,
-                    speaker=speaker,
-                    text=segment['text'],
-                    start_time=segment['start'],
-                    end_time=segment['end'],
-                    confidence=segment.get('confidence', 0.0),
-                    language=result['language']
-                )
-                db.session.add(transcription)
-            db.session.commit()
-
-            _t2 = _time.time()
-            update_progress(55, '正在提取关键词...')
-            keywords = extract_keywords(full_text, top_n=10)
-            print(f'Meeting {meeting_id}: keywords done in {_time.time()-_t2:.1f}s')
-            
-            _t3 = _time.time()
-            update_progress(65, '正在分析主题...')
-            topics = analyze_topic(full_text)
-            print(f'Meeting {meeting_id}: topics done in {_time.time()-_t3:.1f}s')
-            
-            _t4 = _time.time()
-            update_progress(75, '正在生成会议摘要...')
-            print(f'=== About to call generate_summary, text length: {len(full_text)}')
-            summary = generate_summary(full_text, max_length=300)
-            print(f'=== generate_summary returned: {summary[:100]}')
-            print(f'Meeting {meeting_id}: summary done in {_time.time()-_t4:.1f}s')
-            
-            _t5 = _time.time()
-            update_progress(80, '正在分析情绪...')
-            sentiment = analyze_sentiment(full_text)
-            print(f'Meeting {meeting_id}: sentiment done in {_time.time()-_t5:.1f}s')
-
-            audio_quality = None
-            if enable_diarization:
-                try:
-                    audio_quality = get_audio_quality_report(audio_path, audio_path)
-                except Exception as e:
-                    print(f'Audio quality report failed: {e}')
-
-            meeting.duration = int(result['segments'][-1]['end']) if result['segments'] else 0
-            meeting.summary = summary
-            meeting.keywords = json.dumps(keywords)
-            meeting.topics = json.dumps(topics)
-            meeting.sentiment = json.dumps(sentiment)
 
             compliance_result = None
             if enable_compliance:
-                update_progress(85, '正在进行合规检查...')
-                knowledge_items = KnowledgeBase.query.filter_by(status='active').all()
-                transcription_segments = [t.to_dict() for t in Transcription.query.filter_by(meeting_id=meeting.id).all()]
-                
-                score_weights = {}
-                db_weights = ScoreWeight.query.all()
-                if db_weights:
-                    for w in db_weights:
-                        score_weights[w.weight_name] = w.weight_value
-                else:
-                    score_weights = app.config['SCORE_WEIGHTS']
-                
-                compliance_result = calculate_compliance_score(full_text, knowledge_items, score_weights=score_weights, transcription_segments=transcription_segments)
+                update_progress(88, '正在进行合规检查...')
+                # knowledge_items 已在识别前取好（同时用于热词增强）
+                if knowledge_items:
+                    compliance_result = calculate_compliance_score(
+                        full_text,
+                        knowledge_items,
+                        score_weights=resolve_score_weights(),
+                        transcription_segments=raw_segments,
+                    )
+                    compliance_result['score_level'] = get_score_level(
+                        compliance_result['total_score']
+                    )
 
-                report = ComplianceReport(
+            for segment in raw_segments:
+                db.session.add(Transcription(
+                    meeting_id=meeting.id,
+                    speaker=segment.get('speaker') or 'SPEAKER_00',
+                    text=segment['text'],
+                    start_time=segment['start_time'],
+                    end_time=segment['end_time'],
+                    confidence=segment.get('confidence', 0.0),
+                    language=segment.get('language', 'zh'),
+                ))
+
+            meeting.duration = duration
+            meeting.summary = summary
+            meeting.keywords = json.dumps(keywords, ensure_ascii=False)
+            meeting.topics = json.dumps(topics, ensure_ascii=False)
+            meeting.sentiment = json.dumps(sentiment, ensure_ascii=False)
+            meeting.action_items = json.dumps(action_items, ensure_ascii=False)
+            meeting.decisions = json.dumps(decisions, ensure_ascii=False)
+            if audio_quality:
+                meeting.audio_quality = json.dumps(audio_quality, ensure_ascii=False)
+
+            if compliance_result:
+                db.session.add(ComplianceReport(
                     meeting_id=meeting.id,
                     total_score=compliance_result['total_score'],
-                    score_level=get_score_level(compliance_result['total_score']),
-                    detailed_scores=json.dumps(compliance_result['components']),
-                    missing_points=json.dumps(compliance_result['missing_points']),
-                    risk_keywords=json.dumps(compliance_result['risk_keywords_found']),
-                    risk_time_markers=json.dumps(compliance_result.get('risk_time_markers', [])),
-                    point_time_markers=json.dumps(compliance_result.get('point_time_markers', [])),
-                    matched_keywords=json.dumps(compliance_result['matched_keywords']),
-                    suggestions=json.dumps(compliance_result['suggestions'])
-                )
-                db.session.add(report)
-
+                    score_level=compliance_result.get('score_level', ''),
+                    detailed_scores=json.dumps(compliance_result['components'], ensure_ascii=False),
+                    missing_points=json.dumps(compliance_result['missing_points'], ensure_ascii=False),
+                    risk_keywords=json.dumps(compliance_result['risk_keywords_found'], ensure_ascii=False),
+                    risk_time_markers=json.dumps(compliance_result.get('risk_time_markers', []), ensure_ascii=False),
+                    point_time_markers=json.dumps(compliance_result.get('point_time_markers', []), ensure_ascii=False),
+                    matched_keywords=json.dumps(compliance_result['matched_keywords'], ensure_ascii=False),
+                    suggestions=json.dumps(compliance_result['suggestions'], ensure_ascii=False),
+                ))
                 meeting.total_score = compliance_result['total_score']
-                meeting.score_level = report.score_level
+                meeting.score_level = compliance_result.get('score_level', '')
 
             meeting.status = 'finished'
             db.session.commit()
 
-            update_progress(100, '分析完成')
-            print(f'Meeting {meeting_id} analysis completed successfully')
+        update_progress(100, '分析完成')
+        print(f'Meeting {meeting_id} 分析完成，总耗时 {_time.time()-started:.1f}s')
 
-    except Exception as e:
-        print(f'Meeting {meeting_id} analysis failed: {e}')
+    except Exception as exc:
+        print(f'Meeting {meeting_id} 分析失败: {exc}')
         import traceback
         traceback.print_exc()
-        update_progress(-1, f'分析失败: {str(e)}')
+        update_progress(-1, f'分析失败: {exc}')
         with app.app_context():
             meeting = Meeting.query.get(meeting_id)
             if meeting:
@@ -374,36 +439,142 @@ def get_analysis_progress(meeting_id):
     progress = analysis_progress.get(meeting_id, {'progress': 0, 'message': '等待中...'})
     return jsonify({'code': 200, 'data': progress})
 
+
+# ---------------------------------------------------------------- 实时转写（HTTP）
+# 内置页面用 HTTP 分块上传 + 轮询，避免依赖 CDN 上的 socket.io 客户端
+# （离线环境下加载不到脚本会让实时功能点了没反应）。详见 modules/realtime_api.py。
+
+@app.route('/api/realtime/start', methods=['POST'])
+def realtime_start():
+    """开始一次实时转写会话。"""
+    from modules import realtime_api
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'code': 400, 'message': '请求体必须是 JSON 对象'}), 400
+
+    sample_rate = data.get('sample_rate') or 16000
+    try:
+        sample_rate = int(sample_rate)
+    except (TypeError, ValueError):
+        return jsonify({'code': 400, 'message': 'sample_rate 必须是整数'}), 400
+    if not 4000 <= sample_rate <= 192000:
+        return jsonify({'code': 400, 'message': 'sample_rate 超出合理范围'}), 400
+
+    enable_compliance = parse_bool(data.get('enable_compliance'), default=True)
+    knowledge_items = []
+    score_weights = None
+    if enable_compliance:
+        knowledge_items = KnowledgeBase.query.filter_by(status='active').all()
+        score_weights = resolve_score_weights()
+
+    session = realtime_api.start_session(
+        upload_folder=app.config['UPLOAD_FOLDER'],
+        language=data.get('language') or 'zh',
+        sample_rate=sample_rate,
+        meeting_title=data.get('meeting_title'),
+        hotwords=data.get('hotwords'),
+        enable_compliance=enable_compliance,
+        knowledge_items=knowledge_items,
+        score_weights=score_weights,
+    )
+    return jsonify({'code': 200, 'message': '会话已开始', 'data': session})
+
+
+@app.route('/api/realtime/chunk', methods=['POST'])
+def realtime_chunk():
+    """接收一块 Base64 编码的 PCM 音频，返回识别结果（可能暂无输出）。"""
+    from modules import realtime_api
+
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id')
+    if not session_id:
+        return jsonify({'code': 400, 'message': '缺少 session_id'}), 400
+
+    try:
+        result = realtime_api.push_chunk(session_id, data.get('audio'))
+    except KeyError:
+        return jsonify({'code': 404, 'message': '会话不存在或已结束'}), 404
+    except Exception as exc:
+        print(f'[实时转写] 音频块处理失败: {exc}')
+        return jsonify({'code': 400, 'message': f'音频数据无效: {exc}'}), 400
+
+    return jsonify({'code': 200, 'data': result})
+
+
+@app.route('/api/realtime/stop', methods=['POST'])
+def realtime_stop():
+    """结束会话：保存音频并转入后台完整分析。"""
+    from modules import realtime_api
+
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id')
+    if not session_id:
+        return jsonify({'code': 400, 'message': '缺少 session_id'}), 400
+
+    try:
+        info = realtime_api.stop_session(session_id, app=app)
+    except KeyError:
+        return jsonify({'code': 404, 'message': '会话不存在或已结束'}), 404
+
+    return jsonify({'code': 200, 'message': '已停止，正在分析', 'data': info})
+
+
+@app.route('/api/realtime/result/<session_id>')
+def realtime_result(session_id):
+    """轮询实时会话的分析进度与最终结果。"""
+    from modules import realtime_api
+
+    try:
+        return jsonify({'code': 200, 'data': realtime_api.get_result(session_id)})
+    except KeyError:
+        return jsonify({'code': 404, 'message': '会话不存在或结果已过期'}), 404
+
+
+@app.route('/api/realtime/discard', methods=['POST'])
+def realtime_discard():
+    """放弃会话（用户中途关闭页面），清理临时音频。"""
+    from modules import realtime_api
+
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id')
+    if session_id:
+        realtime_api.discard(session_id)
+    return jsonify({'code': 200, 'message': '已清理'})
+
 @app.route('/api/meetings/<int:meeting_id>', methods=['PUT'])
 def update_meeting(meeting_id):
     meeting = Meeting.query.get_or_404(meeting_id)
-    
-    data = request.get_json()
-    
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'code': 400, 'message': '请求体必须是 JSON 对象'}), 400
+
     if 'title' in data:
         meeting.title = data['title']
     if 'summary' in data:
         meeting.summary = data['summary']
     if 'total_score' in data:
         meeting.total_score = data['total_score']
-    
+
     db.session.commit()
-    
-    return jsonify({'code': 200, 'message': '更新成功'})
+
+    return jsonify({'code': 200, 'message': '更新成功', 'data': meeting.to_dict()})
 
 @app.route('/api/meetings/<int:meeting_id>', methods=['DELETE'])
 def delete_meeting(meeting_id):
     meeting = Meeting.query.get_or_404(meeting_id)
-    
+
+    audio_path = meeting.audio_path
     Transcription.query.filter_by(meeting_id=meeting_id).delete()
     ComplianceReport.query.filter_by(meeting_id=meeting_id).delete()
-    
-    if meeting.audio_path and os.path.exists(meeting.audio_path):
-        os.remove(meeting.audio_path)
-    
     db.session.delete(meeting)
     db.session.commit()
-    
+
+    # 数据库记录删除后再清理磁盘文件（原始音频 + 预处理产物）
+    meeting_store.delete_meeting_files(type('M', (), {'audio_path': audio_path})())
+
+    analysis_progress.pop(meeting_id, None)
     return jsonify({'code': 200, 'message': '删除成功'})
 
 @app.route('/api/knowledge-base', methods=['GET'])
@@ -562,19 +733,20 @@ def get_score_weights():
 
 @app.route('/api/score-weights', methods=['PUT'])
 def update_score_weights():
-    data = request.get_json()
-    
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'code': 400, 'message': '请求体必须是 JSON 对象'}), 400
+
     for name, value in data.items():
         weight = ScoreWeight.query.filter_by(weight_name=name).first()
         if weight:
             weight.weight_value = value
         else:
-            weight = ScoreWeight(weight_name=name, weight_value=value)
-            db.session.add(weight)
-    
+            db.session.add(ScoreWeight(weight_name=name, weight_value=value))
+
     db.session.commit()
-    
-    return jsonify({'code': 200, 'message': '权重更新成功'})
+
+    return jsonify({'code': 200, 'message': '权重更新成功', 'data': resolve_score_weights()})
 
 @app.route('/api/languages')
 def get_languages():
@@ -673,91 +845,145 @@ def get_meeting_participants(meeting_id):
 
 @app.route('/api/meetings/test-analyze', methods=['POST'])
 def test_analyze():
-    data = request.get_json()
-    text = data.get('text', '')
-    
-    from modules.compliance_checker import check_compliance, calculate_compliance_score
-    
-    result = check_compliance(text)
-    weights = get_default_weights()
-    score_result = calculate_compliance_score(result, weights)
-    
+    """
+    文本合规自测接口：直接把一段文本丢进合规检查，便于调试知识库配置。
+
+    旧实现引用了不存在的 check_compliance、未定义的 get_default_weights，
+    并且把权重字典当成知识库列表传入，必然报错，这里按真实签名重写。
+    """
+    from modules.compliance_checker import calculate_compliance_score, get_score_level
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'code': 400, 'message': '请求体必须是 JSON 对象'}), 400
+
+    text = (data.get('text') or '').strip()
+    if not text:
+        return jsonify({'code': 400, 'message': '请提供待检查的文本'}), 400
+
+    knowledge_items = KnowledgeBase.query.filter_by(status='active').all()
+    if not knowledge_items:
+        return jsonify({'code': 200, 'message': '知识库为空，请先添加合规规则', 'data': None})
+
+    weights = resolve_score_weights()
+    if isinstance(data.get('score_weights'), dict):
+        weights = {**weights, **data['score_weights']}
+
+    # 没有时间轴信息，仅校验文本层面（语义相似度/要点覆盖/风险/关键词）
+    segments = [{'speaker': 'SPEAKER_00', 'text': text, 'start_time': 0, 'end_time': 0}]
+    result = calculate_compliance_score(
+        text, knowledge_items, score_weights=weights, transcription_segments=segments
+    )
+
     return jsonify({
         'code': 200,
-        'compliance_score': score_result.get('total_score'),
-        'score_level': score_result.get('score_level'),
-        'missing_points': result.get('missing_points'),
-        'risk_keywords': result.get('risk_keywords'),
-        'suggestions': result.get('suggestions'),
-        'matched_keywords': result.get('matched_keywords')
+        'data': {
+            'total_score': result['total_score'],
+            'score_level': get_score_level(result['total_score']),
+            'components': result['components'],
+            'covered_points': result.get('covered_points', []),
+            'missing_points': result['missing_points'],
+            'risk_keywords_found': result['risk_keywords_found'],
+            'risk_time_markers': result.get('risk_time_markers', []),
+            'point_time_markers': result.get('point_time_markers', []),
+            'matched_keywords': result['matched_keywords'],
+            'suggestions': result['suggestions'],
+        }
     })
 
 
 @app.route('/api/meetings/test-summary', methods=['POST'])
 def test_summary():
-    data = request.get_json()
-    text = data.get('text', '')
-    
-    from modules.text_analyzer import generate_summary, extract_keywords, analyze_topic, analyze_sentiment
-    
-    summary = generate_summary(text)
-    keywords = extract_keywords(text)
-    topics = analyze_topic(text)
-    sentiment = analyze_sentiment(text)
-    
+    """文本摘要自测接口。"""
+    from modules.text_analyzer import (
+        analyze_sentiment, analyze_topic, extract_action_items,
+        extract_decisions, extract_keywords, generate_summary,
+    )
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'code': 400, 'message': '请求体必须是 JSON 对象'}), 400
+
+    text = (data.get('text') or '').strip()
+    if not text:
+        return jsonify({'code': 400, 'message': '请提供待分析文本'}), 400
+
     return jsonify({
         'code': 200,
-        'summary': summary,
-        'keywords': keywords,
-        'topics': topics,
-        'sentiment': sentiment
+        'data': {
+            'summary': generate_summary(text, max_length=300),
+            'keywords': extract_keywords(text),
+            'topics': analyze_topic(text),
+            'sentiment': analyze_sentiment(text),
+            'action_items': extract_action_items(text),
+            'decisions': extract_decisions(text),
+        }
     })
 
 
 @app.route('/api/reports/meeting-summary/<int:meeting_id>')
 def get_meeting_summary_report(meeting_id):
+    from modules.report_generator import generate_report_html
+    from modules.text_analyzer import (
+        analyze_sentiment, analyze_topic, extract_action_items,
+        extract_decisions, extract_keywords, generate_summary,
+    )
+
     meeting = Meeting.query.get_or_404(meeting_id)
     transcriptions = Transcription.query.filter_by(meeting_id=meeting_id).all()
     compliance_report = ComplianceReport.query.filter_by(meeting_id=meeting_id).first()
-    
+
+    segments = [t.to_dict() for t in transcriptions]
+    full_text = ' '.join(t.text for t in transcriptions)
+
     meeting_data = {
         'meeting_id': meeting.id,
         'title': meeting.title,
         'date': meeting.date.isoformat(),
         'duration': meeting.duration,
-        'participant_count': count_participants([t.to_dict() for t in transcriptions]),
-        'transcriptions': [t.to_dict() for t in transcriptions]
+        'participant_count': count_participants(segments),
+        'distribution': analyze_participation_distribution(segments),
+        'transcriptions': segments,
+        # 优先使用分析时已落库的结果；老记录没有这些字段时再现场计算
+        'keywords': extract_keywords(full_text, top_n=10) if full_text and not meeting.keywords else (
+            json.loads(meeting.keywords) if meeting.keywords else []),
+        'topics': json.loads(meeting.topics) if meeting.topics else (
+            analyze_topic(full_text) if full_text else []),
+        'summary': meeting.summary or (generate_summary(full_text, max_length=300) if full_text else ''),
+        'sentiment': json.loads(meeting.sentiment) if meeting.sentiment else (
+            analyze_sentiment(full_text) if full_text else {}),
+        'action_items': json.loads(meeting.action_items) if meeting.action_items else (
+            extract_action_items(full_text) if full_text else []),
+        'decisions': json.loads(meeting.decisions) if meeting.decisions else (
+            extract_decisions(full_text) if full_text else []),
     }
-    
-    full_text = ' '.join([t.text for t in transcriptions])
-    meeting_data['keywords'] = extract_keywords(full_text, top_n=10)
-    meeting_data['topics'] = analyze_topic(full_text)
-    meeting_data['summary'] = generate_summary(full_text, max_length=300)
-    meeting_data['sentiment'] = analyze_sentiment(full_text)
-    
+
     if compliance_report:
         meeting_data['compliance'] = compliance_report.to_dict()
-    
+
     html_report = generate_report_html('meeting_summary', meeting_data)
-    
     return html_report, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 @app.route('/api/reports/compliance-trend')
 def get_compliance_trend_report():
+    from modules.report_generator import generate_compliance_trend_report, generate_report_html
+
     meetings = Meeting.query.filter_by(status='finished').order_by(Meeting.date).all()
-    meetings_data = [m.to_dict() for m in meetings]
-    
-    for m in meetings:
-        report = ComplianceReport.query.filter_by(meeting_id=m.id).first()
-        if report:
-            data = next(d for d in meetings_data if d['id'] == m.id)
-            data['compliance_report'] = report
-    
+    if not meetings:
+        return jsonify({'code': 404, 'message': '暂无会议数据'}), 404
+
+    meetings_data = []
+    for meeting in meetings:
+        item = meeting.to_dict()
+        report = ComplianceReport.query.filter_by(meeting_id=meeting.id).first()
+        # 报告生成器按字段名读取，这里统一传字典，避免混用 ORM 对象
+        item['compliance_report'] = report.to_dict() if report else None
+        meetings_data.append(item)
+
     report = generate_compliance_trend_report(meetings_data)
-    
     if not report:
         return jsonify({'code': 404, 'message': '暂无会议数据'}), 404
-    
+
     html_report = generate_report_html('compliance_trend', report)
     return html_report, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
@@ -832,7 +1058,7 @@ def api_transcribe():
         audio_base64 (string): Base64编码的音频数据（二选一）
         language (string): 语言，默认 'zh'（中文）
         enable_compliance (boolean): 是否进行合规检查，默认 true
-        enable_diarization (boolean): 是否进行说话人分离，默认 true
+        enable_diarization (boolean): 是否进行说话人分离，默认 false
     
     返回:
         {
@@ -850,12 +1076,18 @@ def api_transcribe():
             }
         }
     """
+    audio_path = None
+    processed_path = None
     try:
         import base64
+        import binascii
         from modules.analysis_pipeline import analyze_audio
-        
+
+        json_body = request.get_json(silent=True) if request.is_json else {}
+        if not isinstance(json_body, dict):
+            json_body = {}
         audio_file = request.files.get('audio')
-        audio_base64 = request.form.get('audio_base64') or request.json.get('audio_base64') if request.is_json else None
+        audio_base64 = request.form.get('audio_base64') or json_body.get('audio_base64')
         
         if not audio_file and not audio_base64:
             return jsonify({
@@ -869,19 +1101,39 @@ def api_transcribe():
         file_id = str(uuid.uuid4())
         
         if audio_file:
-            filename = audio_file.filename
-            ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else 'wav'
+            filename = audio_file.filename or ''
+            if not allowed_file(filename):
+                return jsonify({
+                    'code': 400,
+                    'message': f'不支持的音频格式，支持：{", ".join(sorted(app.config["ALLOWED_EXTENSIONS"]))}',
+                }), 400
+            ext = filename.rsplit('.', 1)[1].lower()
             audio_path = os.path.join(upload_folder, f'{file_id}.{ext}')
             audio_file.save(audio_path)
         else:
-            audio_bytes = base64.b64decode(audio_base64)
+            if not isinstance(audio_base64, str):
+                return jsonify({'code': 400, 'message': 'audio_base64 必须是字符串'}), 400
+            encoded_audio = audio_base64.split(',', 1)[-1] if audio_base64.startswith('data:') else audio_base64
+            audio_bytes = base64.b64decode(encoded_audio, validate=True)
             audio_path = os.path.join(upload_folder, f'{file_id}.wav')
             with open(audio_path, 'wb') as f:
                 f.write(audio_bytes)
+
+        if os.path.getsize(audio_path) < 1024:
+            return jsonify({'code': 400, 'message': '音频文件太小或为空'}), 400
         
-        language = request.form.get('language', 'zh') or (request.json.get('language', 'zh') if request.is_json else 'zh')
-        enable_compliance = request.form.get('enable_compliance', 'true').lower() == 'true' if not request.is_json else request.json.get('enable_compliance', True)
-        enable_diarization = request.form.get('enable_diarization', 'true').lower() == 'true' if not request.is_json else request.json.get('enable_diarization', True)
+        language = request.form.get('language') or json_body.get('language') or 'zh'
+        supported_languages = {'zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'ar', 'pt'}
+        if language not in supported_languages:
+            return jsonify({'code': 400, 'message': f'不支持的语言代码：{language}'}), 400
+        enable_compliance = parse_bool(
+            request.form.get('enable_compliance') if not request.is_json else json_body.get('enable_compliance'),
+            default=True,
+        )
+        enable_diarization = parse_bool(
+            request.form.get('enable_diarization') if not request.is_json else json_body.get('enable_diarization'),
+            default=False,
+        )
         
         knowledge_items = []
         score_weights = None
@@ -901,7 +1153,8 @@ def api_transcribe():
             language=language,
             knowledge_items=knowledge_items,
             score_weights=score_weights,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            enable_diarization=enable_diarization,
         )
         
         if result:
@@ -916,14 +1169,26 @@ def api_transcribe():
                 'message': '转写分析失败'
             }), 500
             
+    except (binascii.Error, ValueError):
+        return jsonify({'code': 400, 'message': 'audio_base64 不是有效的 Base64 数据'}), 400
     except Exception as e:
         print(f'API转写错误: {e}')
         import traceback
         traceback.print_exc()
         return jsonify({
             'code': 500,
-            'message': f'转写失败: {str(e)}'
+            'message': '转写失败，请查看服务器日志'
         }), 500
+    finally:
+        cleanup_paths = {audio_path, processed_path}
+        if audio_path:
+            cleanup_paths.add(audio_path.rsplit('.', 1)[0] + '_processed.wav')
+        for path in cleanup_paths:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as cleanup_error:
+                    app.logger.warning('无法清理临时音频 %s: %s', path, cleanup_error)
 
 
 @app.route('/api/v1/health', methods=['GET'])
@@ -942,90 +1207,152 @@ def api_health():
 
 
 with app.app_context():
+    # 确保数据目录与上传目录存在
+    for folder in (app.config.get('DATA_FOLDER'), app.config.get('UPLOAD_FOLDER')):
+        if folder and not os.path.exists(folder):
+            os.makedirs(folder, exist_ok=True)
+
     db.create_all()
-    
-    # 确保uploads目录存在
-    if not os.path.exists(app.config['UPLOAD_FOLDER']):
-        os.makedirs(app.config['UPLOAD_FOLDER'])
+    # 老数据库不会因 create_all 获得新列，这里补齐（幂等）
+    meeting_store.ensure_schema()
 
     if not ScoreWeight.query.first():
         for name, value in app.config['SCORE_WEIGHTS'].items():
-            weight = ScoreWeight(weight_name=name, weight_value=value)
-            db.session.add(weight)
+            db.session.add(ScoreWeight(weight_name=name, weight_value=value))
         db.session.commit()
-    
-    # 初始化一些示例数据（如果知识库为空）
+
+    # 初始化示例知识库（仅在知识库为空时）
     if not KnowledgeBase.query.first():
-        # 添加一些示例的政策文件
-        policy1 = KnowledgeBase(
+        db.session.add(KnowledgeBase(
             title='公司会议规范',
             content='所有公司会议必须遵循公司的价值观，尊重每一位参会者的意见，保持积极的工作态度。',
             item_type='policy',
-            keywords=json.dumps(['规范', '价值观', '尊重']),
-            required_points=json.dumps([])
-        )
-        
-        # 添加风险关键词
-        risk_keywords = KnowledgeBase(
+            keywords=json.dumps(['规范', '价值观', '尊重'], ensure_ascii=False),
+            required_points=json.dumps([], ensure_ascii=False),
+        ))
+        db.session.add(KnowledgeBase(
             title='风险词汇表',
             content='会议中应避免使用的负面或消极词汇。',
             item_type='risk_keywords',
-            keywords=json.dumps(['消极', '反对', '抵制', '抱怨', '不满', '拒绝', '不行', '不可能', '做不到']),
-            required_points=json.dumps([])
-        )
-        
-        # 添加必传要点
-        key_points = KnowledgeBase(
+            keywords=json.dumps(list(app.config['RISK_KEYWORDS']), ensure_ascii=False),
+            required_points=json.dumps([], ensure_ascii=False),
+        ))
+        db.session.add(KnowledgeBase(
             title='项目例会要点',
             content='项目例会必须包含的要点内容。',
             item_type='key_points',
-            keywords=json.dumps(['进度', '问题', '计划', '目标']),
-            required_points=json.dumps(['进度汇报', '问题讨论', '下周计划', '风险说明'])
-        )
-        
-        db.session.add(policy1)
-        db.session.add(risk_keywords)
-        db.session.add(key_points)
+            keywords=json.dumps(['进度', '问题', '计划', '目标'], ensure_ascii=False),
+            required_points=json.dumps(
+                ['进度汇报', '问题讨论', '下周计划', '风险说明'], ensure_ascii=False),
+        ))
         db.session.commit()
-    
+
     # 补充金融合规知识库模板（如果不存在）
     if not KnowledgeBase.query.filter_by(title='理财产品销售合规管理办法').first():
-        # 金融合规模板
-        fin_policy = KnowledgeBase(
+        db.session.add(KnowledgeBase(
             title='理财产品销售合规管理办法',
-            content='理财产品销售必须遵守合规要求，包括投资者适当性管理、风险测评、风险告知、禁止误导性宣传等。销售人员必须持证上岗，销售过程需录音录像。',
+            content=('理财产品销售必须遵守合规要求，包括投资者适当性管理、风险测评、风险告知、'
+                     '禁止误导性宣传等。销售人员必须持证上岗，销售过程需录音录像。'),
             item_type='policy',
-            keywords=json.dumps(['风险', '销售', '投资者', '必须', '理财', '产品', '合规', '客户', '告知', '测评', '适当性']),
-            required_points=json.dumps([])
-        )
-        
-        fin_risk = KnowledgeBase(
+            keywords=json.dumps(
+                ['风险', '销售', '投资者', '必须', '理财', '产品', '合规',
+                 '客户', '告知', '测评', '适当性'], ensure_ascii=False),
+            required_points=json.dumps([], ensure_ascii=False),
+        ))
+        db.session.add(KnowledgeBase(
             title='金融销售风险关键词',
             content='金融销售中禁止使用的风险词汇。',
             item_type='risk_keywords',
-            keywords=json.dumps(['保本保收益', '零风险', '稳赚不赔', '绝对安全', '保证收益', '高收益无风险', '只赚不赔', '无风险']),
-            required_points=json.dumps([])
-        )
-        
-        fin_points = KnowledgeBase(
+            keywords=json.dumps(
+                ['保本保收益', '零风险', '稳赚不赔', '绝对安全', '保证收益',
+                 '高收益无风险', '只赚不赔', '无风险'], ensure_ascii=False),
+            required_points=json.dumps([], ensure_ascii=False),
+        ))
+        db.session.add(KnowledgeBase(
             title='理财销售必传要点',
             content='理财产品销售必须覆盖的合规要点。',
             item_type='key_points',
-            keywords=json.dumps(['风险测评', '适当性', '风险告知', '录音录像', '持证上岗', '风险等级', '承受能力', '书面确认', '风险揭示', '合规销售']),
-            required_points=json.dumps(['投资者风险测评', '风险等级匹配', '风险告知义务', '销售过程录音录像', '销售人员持证上岗', '书面确认风险揭示书'])
-        )
-        
-        db.session.add(fin_policy)
-        db.session.add(fin_risk)
-        db.session.add(fin_points)
+            keywords=json.dumps(
+                ['风险测评', '适当性', '风险告知', '录音录像', '持证上岗',
+                 '风险等级', '承受能力', '书面确认', '风险揭示', '合规销售'], ensure_ascii=False),
+            required_points=json.dumps(
+                ['投资者风险测评', '风险等级匹配', '风险告知义务', '销售过程录音录像',
+                 '销售人员持证上岗', '书面确认风险揭示书'], ensure_ascii=False),
+        ))
         db.session.commit()
 
+if app.config.get('MAX_CONTENT_LENGTH') is None:
+    app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024
+
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition'
+    return response
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({
+        'code': 413,
+        'message': f'上传文件过大，最大允许 {int(app.config.get("MAX_CONTENT_LENGTH", 0) / 1024 / 1024)}MB'
+    }), 413
+
+
+def preload_models_async():
+    """
+    在后台线程预加载模型。
+
+    模型加载需要十几秒到几十秒，旧实现放在 socketio.run 之前同步执行，
+    期间端口还没监听、页面打不开，看起来像启动失败。改为后台预热，
+    服务立刻可用，健康检查接口会实时反映模型就绪状态。
+    """
+    if not app.config.get('PRELOAD_MODELS', True):
+        print('[信息] 跳过模型预加载（PRELOAD_MODELS=false）')
+        return
+
+    def _worker():
+        try:
+            init_asr_models()
+        except Exception as exc:
+            print(f'[警告] 预加载语音识别模型失败: {exc}，将在首次请求时重试')
+
+        try:
+            from modules import model_registry
+
+            model_registry.get_sentence_transformer('zh')
+        except Exception as exc:
+            print(f'[警告] 预加载句向量模型失败: {exc}，将在首次请求时重试')
+
+        print('[启动] 模型预加载完成')
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def main():
+    """启动服务：后台预热模型 → 立即监听配置的地址与端口。"""
+    host = app.config.get('HOST', '0.0.0.0')
+    port = int(app.config.get('PORT', 5001))
+    ssl_context = None
+    if app.config.get('SSL_CERT_FILE') and app.config.get('SSL_KEY_FILE'):
+        ssl_context = (app.config['SSL_CERT_FILE'], app.config['SSL_KEY_FILE'])
+
+    display_host = '127.0.0.1' if host in ('0.0.0.0', '::') else host
+    scheme = 'https' if ssl_context else 'http'
+    print(f'\n服务已启动，请在浏览器打开: {scheme}://{display_host}:{port}\n')
+
+    preload_models_async()
+
+    socketio.run(
+        app,
+        host=host,
+        port=port,
+        debug=False,
+        allow_unsafe_werkzeug=True,
+        ssl_context=ssl_context,
+    )
+
+
 if __name__ == '__main__':
-    init_whisper_model()          # 加载 medium 用于上传分析
-    
-    from modules.funasr_transcriber import init_funasr_model
-    init_funasr_model()           # 预加载FunASR用于实时转写
-    
-    register_socketio_events(socketio)
-    print(f'\nReady to accept requests on 0.0.0.0:5000')
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+    main()

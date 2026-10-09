@@ -4,6 +4,7 @@
 使用TF-IDF、TextRank、词性过滤等技术提升精准度
 """
 import os
+import json
 import jieba
 import jieba.posseg as pseg
 from collections import Counter, defaultdict
@@ -54,7 +55,7 @@ def get_qwen_model():
         except Exception as e:
             print(f"[摘要模型] 本地加载失败: {e}")
 
-    # 本地没有，从HuggingFace下载
+    # 本地没有 Qwen 时再从 HuggingFace 下载（离线环境会快速失败，不影响降级）
     try:
         print("[摘要模型] 本地未找到Qwen2.5，正在从HuggingFace下载（约3GB，首次需较长时间）...")
         model_id = 'Qwen/Qwen2.5-1.5B-Instruct'
@@ -68,7 +69,7 @@ def get_qwen_model():
         print(f"[摘要模型] Qwen2.5下载并加载完成 ({sum(p.numel() for p in _qwen_model.parameters())/1e6:.0f}M参数)")
         return _qwen_model, _qwen_tokenizer
     except Exception as e:
-        print(f"[摘要模型] Qwen2.5下载失败: {e}")
+        print(f"[摘要模型] Qwen2.5不可用: {e}")
         _qwen_model = None
         _qwen_tokenizer = None
         return None, None
@@ -83,7 +84,7 @@ def _qwen_summarize(text, max_length=300):
     try:
         import torch
         system_prompt = "你是一个专业的会议摘要助手。请根据给定的会议内容，生成一段简洁、准确、使用第三人称的结构化摘要。要求：1. 使用第三人称叙述，避免'我''我们'等第一人称；2. 客观概括会议核心内容；3. 语言正式、条理清晰；4. 只输出摘要内容，不要额外解释。"
-        user_prompt = f"会议内容：\n{text[:3000]}\n\n请生成会议摘要："
+        user_prompt = f"会议内容：\n{text}\n\n请生成会议摘要："
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -96,10 +97,11 @@ def _qwen_summarize(text, max_length=300):
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_length,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True,
-                num_beams=3,
+                # 贪心解码：本机是 CPU 推理，旧参数 num_beams=3 + do_sample=True
+                # 相当于一次生成跑 3 遍束搜索还要采样，长会议摘要要等好几分钟；
+                # 贪心解码对会议摘要这类「忠实复述」任务质量几乎无损，速度提升约 3 倍。
+                do_sample=False,
+                num_beams=1,
                 pad_token_id=tokenizer.eos_token_id,
                 repetition_penalty=1.1,
             )
@@ -116,55 +118,86 @@ _mt5_model = None
 _mt5_tokenizer = None
 
 def get_mt5_model():
-    """加载并缓存mT5摘要大模型"""
+    """
+    加载并缓存mT5摘要大模型（备选方案）。
+
+    只使用本地缓存：模型仓库带 5 次重试，离线环境下每次调用都要白白等十几秒，
+    所以这里强制 local_files_only=True —— 本地没有就直接放弃，由调用方降级。
+    """
     global _mt5_model, _mt5_tokenizer
     if _mt5_model is not None:
         return _mt5_model, _mt5_tokenizer
 
     try:
-        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-        print("[摘要模型] 正在加载mT5摘要大模型...")
-        _mt5_tokenizer = AutoTokenizer.from_pretrained('csebuetnlp/mT5_multilingual_XLSum', legacy=True)
-        _mt5_model = AutoModelForSeq2SeqLM.from_pretrained('csebuetnlp/mT5_multilingual_XLSum')
+        model_id = 'csebuetnlp/mT5_multilingual_XLSum'
+        print("[摘要模型] 正在加载mT5摘要大模型（仅本地缓存）...")
+        _mt5_tokenizer = AutoTokenizer.from_pretrained(
+            model_id, legacy=True, local_files_only=True
+        )
+        _mt5_model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_id, local_files_only=True
+        )
         _mt5_model.eval()
         print(f"[摘要模型] mT5加载完成 ({sum(p.numel() for p in _mt5_model.parameters())/1e6:.0f}M参数)")
         return _mt5_model, _mt5_tokenizer
     except Exception as e:
-        print(f"[摘要模型] mT5加载失败: {e}")
+        print(f"[摘要模型] mT5不可用（无本地缓存，跳过）: {e}")
         _mt5_model = None
         _mt5_tokenizer = None
         return None, None
 
 
+# 实体覆盖判据的样本量下限与阈值。
+# 抽象式摘要本来就会引入原文没有的表达（「介绍」「对接」「确保」…），
+# 所以词覆盖率只能作为**粗筛**，而且必须样本足够才有意义：
+# 实测一段 166 字的通话，摘要里 3 字以上实体只有 3 个且都不在原文中，
+# ratio 直接冲到 1.0，把一份完全正确的摘要误判成幻觉。
+# 因此只在长实体数量达到下限时才做比例判断；否则只依赖更精确的新闻式模板判据。
+MIN_ENTITIES_FOR_HALLUCINATION_CHECK = 8
+NOVEL_ENTITY_RATIO = 0.6
+ENTITY_MIN_LENGTH = 3
+
+
 def _is_hallucinated(summary, source_text):
-    """检测摘要中的幻觉内容（与原文严重不符的部分）"""
-    # 新闻式幻觉特征
+    """
+    检测摘要是否幻觉（与原文严重不符）。
+
+    判据：
+      1. 新闻式模板词出现在摘要里而原文没有（「报道」「记者」「证监会」「《》」「X月X日」）
+         → 判定为幻觉。这是精确判据，优先使用。
+      2. 摘要中「3 字以上实体」有过多不出现在原文中 → 疑似偏题。
+         但仅当这类实体不少于 8 个时才启用：样本太少时比例不可靠，
+         会把正常改写误杀（见上面的常量说明）。
+    """
+    if not summary:
+        return True
+
     news_patterns = [
         r'周[一二三四五六日]\(', r'\d+月\d+日', r'《[^》]+》',
         r'报道', r'网络版', r'记者', r'消息人士',
-        r'央行', r'证监会', r'银保监',  # 除非原文提到
+        r'央行', r'证监会', r'银保监',
     ]
     for p in news_patterns:
         if re.search(p, summary) and p not in source_text:
             return True
 
-    # 检查摘要中关键实体是否在原文中
-    summary_entities = set()
-    for w in jieba.lcut(summary):
-        if len(w) >= 3 and w not in STOPWORDS_ZH:
-            summary_entities.add(w)
+    summary_entities = {
+        w for w in jieba.lcut(summary)
+        if len(w) >= ENTITY_MIN_LENGTH and w not in STOPWORDS_ZH
+    }
+    if len(summary_entities) < MIN_ENTITIES_FOR_HALLUCINATION_CHECK:
+        return False
 
-    source_entities = set()
-    for w in jieba.lcut(source_text):
-        if len(w) >= 3 and w not in STOPWORDS_ZH:
-            source_entities.add(w)
-
-    # 如果摘要中有超过60%的3字以上实体不在原文中，判定为幻觉
-    if summary_entities:
-        novel_ratio = len(summary_entities - source_entities) / len(summary_entities)
-        if novel_ratio > 0.6:
-            return True
+    source_entities = {
+        w for w in jieba.lcut(source_text)
+        if len(w) >= ENTITY_MIN_LENGTH and w not in STOPWORDS_ZH
+    }
+    novel_ratio = len(summary_entities - source_entities) / len(summary_entities)
+    if novel_ratio > NOVEL_ENTITY_RATIO:
+        print(f'[摘要模型] 实体覆盖过低（{novel_ratio:.0%} 不在原文中），判定为幻觉')
+        return True
 
     return False
 
@@ -258,19 +291,68 @@ def _mt5_polish_sentences(sentences, source_text):
 _sentence_transformer_models = {}
 
 def get_sentence_transformer_model(language='zh'):
-    """获取缓存的sentence_transformers模型"""
-    model_name = "BAAI/bge-small-zh-v1.5" if language == 'zh' else "all-MiniLM-L6-v2"
-    
+    """
+    获取缓存的句向量模型。
+
+    统一走 model_registry（本地优先 + local_files_only）：离线环境下不会再向
+    HuggingFace 发请求重试，避免每次主题分析都白等十几秒。
+    同时该模型与 compliance_checker 共用同一实例，不会重复加载占内存。
+    """
+    from modules import model_registry
+
+    model_name = 'bge-small-zh-v1.5' if language == 'zh' else 'all-MiniLM-L6-v2'
     if model_name not in _sentence_transformer_models:
-        try:
-            from sentence_transformers import SentenceTransformer
-            _sentence_transformer_models[model_name] = SentenceTransformer(model_name)
-            print(f"Loaded sentence_transformer model: {model_name}")
-        except Exception as e:
-            print(f"Failed to load sentence_transformer model: {e}")
+        model = model_registry.get_sentence_transformer(language)
+        if model is None:
             return None
-    
+        _sentence_transformer_models[model_name] = model
+
     return _sentence_transformer_models[model_name]
+
+
+_registered_terms = set()
+_config_terms_registered = False
+
+
+def register_domain_terms(words):
+    """
+    把行业词汇注册进 jieba 词典，让它们不被切碎。
+
+    例如「中国人寿」不注册会被切成「中国」+「人寿」，导致关键词与主题分析
+    出现「中国」这种无意义词。词汇来源是配置里的行业词表与知识库关键词
+    （即需求里的「行业词汇库」），注册一次即全局生效。
+    """
+    if not words:
+        return
+    items = words if isinstance(words, (list, tuple, set)) else str(words).split()
+    for word in items:
+        word = str(word).strip()
+        if len(word) < 2 or word in _registered_terms:
+            continue
+        try:
+            jieba.add_word(word)
+            _registered_terms.add(word)
+        except Exception:
+            continue
+
+
+def _ensure_domain_terms():
+    """
+    首次调用时把配置里的行业词汇注册进 jieba。
+
+    用一个独立标志位记录「配置词表是否已注册」，不能拿 _registered_terms 是否为空
+    当判断依据——调用方可能先注册了知识库关键词，那会让我们误以为已经注册过配置词表。
+    """
+    global _config_terms_registered
+    if _config_terms_registered:
+        return
+    _config_terms_registered = True
+    try:
+        from config import Config
+
+        register_domain_terms(Config.ASR_HOTWORDS)
+    except Exception:
+        pass
 
 
 # 停用词表
@@ -305,6 +387,7 @@ def extract_keywords(text, top_n=10, language='zh'):
     改进：使用TF-IDF + 词性过滤，只保留名词、动词、专有名词
     """
     if language == 'zh':
+        _ensure_domain_terms()
         # 使用jieba.posseg进行词性标注
         words_with_pos = pseg.lcut(text)
 
@@ -789,15 +872,17 @@ def _convert_to_narrative(sentence):
         (r'各位领导', '参会人员'),
         (r'同事们', '参会人员'),
         (r'大家好', ''),
-        (r'大家', '参会人员'),
-        (r'咱们', '参会人员'),
-        (r'我们', '会议'),
-        (r'我', '发言者'),
+        # 注意：这里**不要**再放裸代词替换（我 / 我们 / 咱们 / 大家 单独成词）。
+        # 旧实现把它们无条件全局替换，把句子改成语义错误的怪句：
+        #   「咱们这个方案还是比较实在的」→「参会人员这个方案还是比较实在的」
+        #   「他之前在我这边配置了」      →「他之前在发言者这边配置了」
+        # 只有「我认为 / 我们建议」这类**短语**才适合改成书面转述；
+        # 落单的代词保留原样（属于会议原话引用），比改错更可读。
     ]
-    
+
     for pattern, replacement in patterns:
         text = re.sub(pattern, replacement, text)
-    
+
     text = re.sub(r'发言者们', '参会人员', text)
     text = re.sub(r'参会人员参会人员', '参会人员', text)
     text = re.sub(r'发言者发言者', '发言者', text)
@@ -948,7 +1033,44 @@ def _extract_core_points(sentences, keywords_set, max_points=3):
     return result
 
 
-def generate_summary(text, max_length=500, language='zh', use_model=True):
+def _coverage_digest(text, sentences, limit=3000):
+    """
+    为摘要大模型准备「覆盖全文」的输入。
+
+    旧实现直接截取 text[:3000]，一场一小时的会议只能总结前二十分钟，
+    后面的讨论、决议全部看不到。这里改为按时间轴均匀抽样句子，
+    让开头、中间、结尾都有代表句进入模型，再按长度截断。
+    """
+    if len(text) <= limit:
+        return text
+
+    if not sentences:
+        # 没有分句信息：按字符均匀抽段，避免只取开头
+        step = max(1, len(text) // limit + 1)
+        sampled = [text[i:i + step] for i in range(0, len(text), step * 2)]
+        return ''.join(sampled)[:limit]
+
+    total_chars = sum(len(s) for s in sentences)
+    if total_chars <= limit:
+        return '。'.join(sentences)
+
+    avg_len = max(1, total_chars // len(sentences))
+    keep = max(4, min(len(sentences), limit // avg_len))
+    indices = sorted({int(i) for i in np.linspace(0, len(sentences) - 1, keep)})
+    return '。'.join(sentences[i] for i in indices)[:limit]
+
+
+def text_models_enabled():
+    """是否启用大模型生成摘要（由 config.ENABLE_TEXT_MODELS 控制）。"""
+    try:
+        from config import Config
+
+        return bool(Config.ENABLE_TEXT_MODELS)
+    except Exception:
+        return True
+
+
+def generate_summary(text, max_length=500, language='zh', use_model=None):
     """
     生成会议摘要：优先使用mT5大模型，降级使用TextRank
     策略：
@@ -1012,17 +1134,22 @@ def generate_summary(text, max_length=500, language='zh', use_model=True):
                 break
         processed_sents = fallback_sents
 
+    if use_model is None:
+        use_model = text_models_enabled()
+
     # ====== 第二步：尝试大模型生成摘要（Qwen2.5优先，mT5备选） ======
     model_summary = None
     if use_model:
+        # 用覆盖全文的抽样文本，避免长会议只总结开头
+        digest = _coverage_digest(text, sentences)
         # 优先Qwen2.5
-        qwen_result = _qwen_summarize(text, max_length=max_length)
+        qwen_result = _qwen_summarize(digest, max_length=max_length)
         if qwen_result and len(qwen_result) > 20 and not _is_hallucinated(qwen_result, text):
             model_summary = qwen_result
             print(f'[摘要模型] Qwen2.5生成成功: {qwen_result[:80]}...')
         else:
             # 备选mT5
-            mt5_result = _mt5_summarize(text[:1500], max_length=200)
+            mt5_result = _mt5_summarize(digest[:1500], max_length=200)
             if mt5_result and len(mt5_result) > 20 and not _is_hallucinated(mt5_result, text):
                 model_summary = mt5_result
                 print(f'[摘要模型] mT5生成成功')
@@ -1259,37 +1386,142 @@ def _clean_final_summary(summary):
     return s.strip()
 
 
+# 疑问 / 不确定表述：出现这些说明是提问或随口商量，不是"要做的事"或"已定的决议"
+_INTERROGATIVE_MARKERS = (
+    '什么', '怎么', '怎样', '多少', '多长时间', '多久', '哪', '几', '是否',
+    '吗', '呢', '吧？', '为什么', '如何', '能不能', '可不可以', '要不要',
+    '考虑一下', '再说', '看看', '问一下', '咨询一下', '了解一下',
+)
+
+# 只在句首或分句首出现的决议引导词。
+# 注意「通过」有歧义：作决议动词时是「（会议）通过」，但更常见的是「经由」之意
+# （「通过他我了解到…」）。所以决议表态必须带主语，或使用无歧义的动词形式，
+# 不能把裸「通过」当决议。
+_DECISION_LEAD_PATTERNS = (
+    # 带主语的结论性表态：会议/双方/一致 + 决定/同意/通过/批准…
+    r'(?:^|[。！？；，,])[^。！？；，,]{0,6}(?:会议|双方|大家|全体|与会人员|一致)'
+    r'(?:决定|决议|议定|同意|赞成|通过|批准|采纳|明确|强调|要求|规定)[^。！？]*',
+    # 无主语但用词本身即决议的动词
+    r'(?:^|[。！？；，,])[^。！？；，,]{0,6}'
+    r'(?:表决通过|审议通过|批准了|采纳了|达成一致|形成决议)[^。！？]*',
+)
+
+# 未定/待定的表述：属于将来的打算或还没定，不算已有决议
+_TENTATIVE_MARKERS = ('再决定', '再商量', '再议', '待定', '未定', '还没定',
+                      '之后再', '回头再', '再研究', '再考虑')
+
+
+def _looks_interrogative(sentence):
+    """判断句子是否为提问、不确定或未定的表述（这类不应作为待办或决议）。"""
+    if not sentence:
+        return True
+    stripped = sentence.strip()
+    if stripped.endswith(('？', '?')):
+        return True
+    if any(marker in stripped for marker in _INTERROGATIVE_MARKERS):
+        return True
+    if any(marker in stripped for marker in _TENTATIVE_MARKERS):
+        return True
+    # 以疑问/商量语气开头
+    return bool(re.match(r'^(请问|是否|能否|要不|是不是|有没有)', stripped))
+
+
 def extract_action_items(text, language='zh'):
     """
-    从文本中提取行动项/决议
-    识别"需要"、"应该"、"决定"、"负责"、"完成"等关键词引导的句子
+    从文本中提取待办事项。
+
+    识别由「需要/必须/应该/要求」「负责/跟进/落实/执行」「计划/安排」等
+    引导的、真正表示待办动作的句子。
+
+    过滤规则（旧实现缺失，导致把提问当待办）：
+      - 疑问句与不确定表述不算待办（「需要多长时间」「准备什么材料」是提问）
+      - 过短、无实际动作词的片段丢弃
     """
+    if not text:
+        return []
+
     if language == 'zh':
+        # 注意：引导词必须写成「多字词」的交替，不能写成字符类。
+        # 旧实现用 [计划预计安排]、[负责跟进落实执行] 这类字符类，
+        # 单个汉字（计/行/实/下）就会在词中间命中，导致抽出
+        # 「行卡，线上填写问卷就可以」「计算的，有没有保本承诺」这种碎片。
         action_patterns = [
-            r'[需要必须应该要求][^。！？]*[。！？]',
-            r'[决定决议同意批准][^。！？]*[。！？]',
-            r'[负责跟进落实执行][^。！？]*[。！？]',
-            r'[计划预计安排][^。！？]*[。！？]',
-            r'[下周下月近期][^。！？]*[。！？]',
+            r'(?:需要|必须|应该|应当|要求|务必|请)[^。！？]*[。！？]',
+            r'(?:负责|跟进|落实|执行|完成|提交|组织|开展|推进|整改)[^。！？]*[。！？]',
+            r'(?:计划|预计|安排|拟于|将于|定于)[^。！？]*[。！？]',
+            r'(?:下周|下月|近期|本周|明天)[^。！？]*[。！？]',
         ]
     else:
         action_patterns = [
             r'[Nn]eed to[^.!?]*[.!?]',
             r'[Mm]ust[^.!?]*[.!?]',
             r'[Ss]hould[^.!?]*[.!?]',
-            r'[Dd]ecide[^.!?]*[.!?]',
             r'[Pp]lan[^.!?]*[.!?]',
         ]
 
     action_items = []
     for pattern in action_patterns:
-        matches = re.findall(pattern, text)
-        for match in matches:
+        for match in re.findall(pattern, text):
             clean = match.strip('。！？. \n')
-            if len(clean) > 5 and clean not in action_items:
+            if len(clean) < 6 or clean in action_items:
+                continue
+            if language == 'zh' and _looks_interrogative(clean):
+                continue
+
+            # 包含去重（双向）：重叠匹配会产出「组织一次培训」与
+            # 「下周组织一次培训」这类互为片段的条目，只保留信息更完整的一条
+            handled = False
+            for index, existing in enumerate(action_items):
+                if clean in existing:
+                    handled = True
+                    break
+                if existing in clean:
+                    action_items[index] = clean
+                    handled = True
+                    break
+            if not handled:
                 action_items.append(clean)
 
     return action_items[:5]
+
+
+def extract_decisions(text, language='zh'):
+    """
+    提取会议决议结论（「决定/决议/通过/批准/一致同意」等表态句）。
+
+    与 extract_action_items 的分工：
+        - 决议结论：会议达成的结论性意见（要做什么决定）
+        - 待办事项：需要谁去落实的具体动作（谁去做、什么时候做完）
+
+    过滤规则：疑问句、提问语境、以及「再决定/考虑一下」这类个人未定意图都不算决议。
+    """
+    if not text:
+        return []
+
+    if language == 'zh':
+        decision_patterns = _DECISION_LEAD_PATTERNS
+    else:
+        decision_patterns = (
+            r'(?:^|[.!?;,])\s*[^.!?;,]{0,20}(?:decided|approved|agreed|resolved)[^.!?]*',
+            r'(?:^|[.!?;,])\s*[^.!?;,]{0,20}(?:conclusion|resolution)[^.!?]*',
+        )
+
+    decisions = []
+    for pattern in decision_patterns:
+        for match in re.findall(pattern, text, flags=re.IGNORECASE):
+            clean = _clean_summary_text(
+                match.strip('。！？. \n；;，, ')
+            )
+            if len(clean) < 6:
+                continue
+            if language == 'zh' and _looks_interrogative(clean):
+                continue
+            # 去掉开头的分隔符残留
+            clean = clean.lstrip('，,；;、 ')
+            if clean and clean not in decisions:
+                decisions.append(clean)
+
+    return decisions[:5]
 
 
 def analyze_topic(text, language='zh', candidate_topics=None):
@@ -1297,12 +1529,15 @@ def analyze_topic(text, language='zh', candidate_topics=None):
     对全文内容进行语义分析，识别讨论主题和核心方向
     改进：更细化的主题词库 + 语义相似度
     """
-    # 扩展主题词库（更细粒度）
+    # 扩展主题词库（更细粒度，并覆盖业务/沟通类场景）
     default_topics = [
         "工作汇报", "项目讨论", "问题解决", "决策制定",
         "进度跟进", "计划安排", "意见交流", "培训学习",
         "风险讨论", "合规审查", "财务预算", "人事安排",
-        "客户服务", "产品设计", "技术方案", "市场营销"
+        "客户服务", "产品设计", "技术方案", "市场营销",
+        # 业务沟通场景（销售通话、客户拜访这类录音以前会被硬套到
+        # 「人事安排」「客户服务」上，主题看着完全不对）
+        "客户沟通", "产品介绍", "理赔服务", "销售推广",
     ]
     topics = candidate_topics or default_topics
 
@@ -1315,7 +1550,7 @@ def analyze_topic(text, language='zh', candidate_topics=None):
         "进度跟进": ["进度", "进展", "跟进", "更新", "状态", "检查", "追踪", "督办", "落实", "执行"],
         "计划安排": ["计划", "安排", "规划", "部署", "排期", "时间表", "日程", "路线图", "目标", "任务"],
         "意见交流": ["意见", "建议", "讨论", "交流", "想法", "看法", "观点", "反馈", "提议", "倡议"],
-        "培训学习": ["培训", "学习", "课程", "讲座", "知识", "教学", "指导", "培训", "分享", "研讨"],
+        "培训学习": ["培训", "学习", "课程", "讲座", "知识", "教学", "指导", "分享", "研讨", "讲解"],
         "风险讨论": ["风险", "隐患", "问题", "预警", "管控", "防范", "评估", "识别", "应对", "控制"],
         "合规审查": ["合规", "规定", "制度", "政策", "规范", "标准", "要求", "检查", "审核", "遵从"],
         "财务预算": ["预算", "费用", "成本", "支出", "收入", "资金", "财务", "报销", "拨款", "核算"],
@@ -1324,6 +1559,10 @@ def analyze_topic(text, language='zh', candidate_topics=None):
         "产品设计": ["产品", "设计", "功能", "体验", "界面", "需求", "原型", "测试", "迭代", "用户"],
         "技术方案": ["技术", "架构", "系统", "方案", "实现", "接口", "模块", "部署", "性能", "优化"],
         "市场营销": ["市场", "营销", "推广", "品牌", "宣传", "渠道", "客户", "销售", "策略", "活动"],
+        "客户沟通": ["客户", "沟通", "联系", "拜访", "回访", "需求", "对接", "推荐", "答复", "咨询"],
+        "产品介绍": ["产品", "介绍", "方案", "条款", "保障", "保额", "功能", "特点", "优势", "责任"],
+        "理赔服务": ["理赔", "赔付", "报销", "住院", "医疗", "免责", "保险责任", "核保", "免赔", "保单"],
+        "销售推广": ["销售", "推广", "业绩", "签单", "促成", "话术", "宣传", "渠道", "活动", "转化"],
     }
 
     # 先尝试语义相似度
@@ -1420,38 +1659,87 @@ def keyword_based_topic(text, topics, topic_keywords=None):
             for t, s, h, th in scores[:5]]
 
 
+def _snownlp_sentiments(text):
+    """snownlp 情感分值（0~1）。文本过长时按句抽样，避免耗时过长。"""
+    from snownlp import SnowNLP
+
+    text = text.strip()
+    if len(text) <= 500:
+        return SnowNLP(text).sentiments
+
+    sentences = [s for s in re.split(r'[。！？\n]', text) if len(s.strip()) > 5]
+    if not sentences:
+        return SnowNLP(text[:500]).sentiments
+
+    sample_size = min(20, len(sentences))
+    step = max(1, len(sentences) // sample_size)
+    scores = []
+    for sentence in sentences[::step][:sample_size]:
+        try:
+            scores.append(SnowNLP(sentence).sentiments)
+        except Exception:
+            continue
+    if not scores:
+        return 0.5
+    return sum(scores) / len(scores)
+
+
 def analyze_sentiment(text, language='zh'):
     """
-    分析会议情绪倾向（辅助风险识别）
-    使用snownlp开源库进行中文情感分析
-    """
-    if language == 'zh':
-        try:
-            from snownlp import SnowNLP
-            
-            s = SnowNLP(text)
-            score = s.sentiments
-            
-            if score > 0.6:
-                sentiment = 'positive'
-            elif score < 0.4:
-                sentiment = 'negative'
-            else:
-                sentiment = 'neutral'
+    分析会议情绪倾向（辅助风险识别）。
 
-            return {
-                'sentiment': sentiment,
-                'score': round(score, 4),
-                'positive': 0,
-                'negative': 0,
-                'positive_score': round(score, 2),
-                'negative_score': round(1 - score, 2)
-            }
-        except Exception as e:
-            print(f"snownlp sentiment analysis failed: {e}, using fallback")
-            return _fallback_sentiment_analysis(text)
-    
-    return _fallback_sentiment_analysis(text)
+    做法：snownlp 与规则词典两路结果加权融合。
+    单纯依赖 snownlp 会出现明显误判——例如「会议开始，请大家汇报一下本周的工作」
+    会被判成 negative（分值 0.06）。snownlp 训练语料偏电商评论，对会议这种
+    中性叙述文本容易给低分；词典法带否定词与程度副词处理，对会议场景更稳。
+    两者融合后中性与负面能正确区分。
+    """
+    if language != 'zh':
+        return _fallback_sentiment_analysis(text)
+
+    lexical = _fallback_sentiment_analysis(text)
+    lexical_score = lexical.get('score', 0.5)
+    lexical_total = lexical.get('lexical_total', 0)
+
+    # 词典完全没找到任何情感词，说明这段文本就是中性叙述。
+    # snownlp 的训练语料偏电商评论，对会议陈述句会给出很低的分数
+    # （例如「会议开始，请大家汇报一下本周工作」得 0.06），此时不应据此判为负面。
+    if lexical_total == 0:
+        return {
+            'sentiment': 'neutral',
+            'score': 0.5,
+            'positive': 0,
+            'negative': 0,
+            'positive_score': 0.5,
+            'negative_score': 0.5,
+        }
+
+    try:
+        snow_score = _snownlp_sentiments(text)
+    except Exception as e:
+        print(f"snownlp sentiment analysis failed: {e}, using fallback")
+        return lexical
+
+    # 有情感词证据时以词典为主（带否定词与程度副词处理），snownlp 作辅助
+    score = 0.6 * lexical_score + 0.4 * snow_score
+
+    # 中性区间放宽到 0.35~0.65：会议文本以陈述为主，过分敏感会把正常
+    # 工作讨论误报成负面情绪
+    if score > 0.65:
+        sentiment = 'positive'
+    elif score < 0.35:
+        sentiment = 'negative'
+    else:
+        sentiment = 'neutral'
+
+    return {
+        'sentiment': sentiment,
+        'score': round(score, 4),
+        'positive': 0,
+        'negative': 0,
+        'positive_score': round(score, 2),
+        'negative_score': round(1 - score, 2),
+    }
 
 
 def _fallback_sentiment_analysis(text):
@@ -1534,12 +1822,16 @@ def _fallback_sentiment_analysis(text):
 
     total = positive_score + negative_score
     if total == 0:
-        return {'sentiment': 'neutral', 'score': 0.5, 'positive': 0, 'negative': 0, 'positive_score': 0, 'negative_score': 0}
+        return {'sentiment': 'neutral', 'score': 0.5, 'positive': 0, 'negative': 0,
+                'positive_score': 0, 'negative_score': 0, 'lexical_total': 0}
 
-    score = positive_score / total
-    if score > 0.55:
+    # 加 0.5 的平滑：只有正面词、没有负面词时，不该直接给出「1.0 正面」这种满分结论。
+    # 一次销售通话里出现几个正面词（「保障」「健康」）是很弱的证据，
+    # 平滑后比值会落在 0.9 左右而不是 1.0，避免把不确定说成确定。
+    score = (positive_score + 0.5) / (total + 1.0)
+    if score > 0.6:
         sentiment = 'positive'
-    elif score < 0.45:
+    elif score < 0.4:
         sentiment = 'negative'
     else:
         sentiment = 'neutral'
@@ -1550,5 +1842,6 @@ def _fallback_sentiment_analysis(text):
         'positive': 0,
         'negative': 0,
         'positive_score': round(positive_score, 2),
-        'negative_score': round(negative_score, 2)
+        'negative_score': round(negative_score, 2),
+        'lexical_total': round(total, 2),
     }

@@ -1,33 +1,71 @@
 import json
 import os
+import re
 from datetime import datetime
+
+
+def _load_list(raw):
+    """
+    安全解析知识库里的 JSON 数组字段。
+
+    知识库由接口写入，客户端可能传 null、字符串或对象，直接 json.loads 会得到
+    None / str / dict，后续迭代就会抛 TypeError 或按字符逐个匹配（把「合规」
+    拆成「合」「规」当关键词）。这里统一收敛为字符串列表。
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(item) for item in raw if item is not None and str(item).strip()]
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            value = json.loads(text)
+        except (TypeError, ValueError):
+            return [text]
+        if isinstance(value, list):
+            return [str(item) for item in value if item is not None and str(item).strip()]
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        return []
+    return [str(raw)]
+
 
 _compliance_model = None
 
 def _get_compliance_model():
+    """
+    获取中文句向量模型（本地优先）。
+
+    与 text_analyzer 共用 model_registry 的单例：旧实现各自加载一份 bge，
+    白白多占约 200MB 内存和一次加载时间。
+    """
     global _compliance_model
     if _compliance_model is None:
         try:
-            from sentence_transformers import SentenceTransformer
-            
-            # 优先使用本地中文向量模型 bge-small-zh-v1.5
-            local_model_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'models', 'bge-small-zh-v1.5'
-            )
-            
-            if os.path.exists(local_model_path):
-                _compliance_model = SentenceTransformer(local_model_path)
-                print(f'Loaded bge-small-zh-v1.5 from local: {local_model_path}')
-            else:
-                # 降级：尝试从HuggingFace下载
-                os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
-                _compliance_model = SentenceTransformer('BAAI/bge-small-zh-v1.5')
-                print('Loaded bge-small-zh-v1.5 from HuggingFace')
+            from modules import model_registry
+
+            _compliance_model = model_registry.get_sentence_transformer('zh')
         except Exception as e:
             print(f"Failed to load compliance model: {e}")
             return None
     return _compliance_model
+
+
+# 必传要点模板的适用性门控阈值（转写文本 ↔ 模板的语义相似度）。
+# 实测：不对口的组合 0.36~0.44（如「项目例会要点」套到保险销售通话上得 0.4435），
+# 对口组合 0.52~0.72（如「理财销售必传要点」对理财文本得 0.7163）。
+# 低于阈值就判定「没有适用的模板」，而不是宣称所有要点都遗漏——
+# 否则一通正常的销售电话也会被判成「不合格、遗漏进度汇报/问题讨论」。
+POINT_TEMPLATE_MIN_RELEVANCE = 0.50
+
+
+def _template_text(item):
+    """把要点模板拼成一段可比对的文本（标题 + 内容 + 各要点）。"""
+    parts = [getattr(item, 'title', '') or '', getattr(item, 'content', '') or '']
+    parts.extend(_load_list(getattr(item, 'required_points', None)))
+    return ' '.join(part for part in parts if part)
 
 
 def calculate_compliance_score(transcription_text, knowledge_base_items, score_weights=None, transcription_segments=None):
@@ -64,6 +102,8 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
             'missing_points': [],
             'risk_keywords_found': [],
             'risk_time_markers': [],
+            # 与正常返回保持同样的键集合，避免调用方 KeyError
+            'point_time_markers': [],
             'matched_keywords': [],
             'suggestions': ['知识库为空，请先添加合规检查规则']
         }
@@ -87,59 +127,96 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
     score_components['semantic_similarity'] = best_policy_sim * weights['semantic_similarity']
     
     # 2. 必传要点覆盖率（30分）- 只考虑与内容相关的要点模板
-    #    策略：找出关键词匹配最多的key_points条目，用它来计算覆盖率
-    best_point_item = None
-    best_point_match_count = 0
-    
+    #    策略：优先用关键词命中数挑要点模板；一个都没命中时，退回到「与最相关
+    #    政策语义最接近」的要点模板。否则一份完全没提要点的会议会因为
+    #    best_point_item 为空而报出「零遗漏」，遗漏检测形同虚设。
+    candidates = []
     for item in point_items:
-        keywords = json.loads(item.keywords) if item.keywords else []
+        keywords = _load_list(item.keywords)
         match_count = sum(1 for kw in keywords if kw and kw.lower() in transcription_text.lower())
-        if match_count > best_point_match_count:
-            best_point_match_count = match_count
-            best_point_item = item
-    
-    # 另外：也根据政策相似度来找对应的要点（如果政策和要点标题相似）
-    if policy_similarities and policy_similarities[0][1] > 0.1:
-        best_policy_title = policy_similarities[0][0].title
-        # 找标题最匹配的要点条目
+        candidates.append((item, match_count))
+
+    best_point_item = None
+    if candidates:
+        best_item, best_count = max(candidates, key=lambda pair: pair[1])
+        if best_count > 0:
+            best_point_item = best_item
+
+    if best_point_item is None and point_items:
+        # 没有关键词命中：用语义相似度找该政策对应的要点模板
+        reference = policy_similarities[0][0] if policy_similarities else None
+        best_score = 0.0
         for item in point_items:
-            title_sim = simple_similarity(best_policy_title, item.title)
-            if title_sim > 0.3:
+            if reference is not None:
+                text = f'{reference.title} {reference.content}'
+                score = compute_semantic_similarity(text, f'{item.title} {item.content}')
+            else:
+                score = simple_similarity(transcription_text, f'{item.title} {item.content}')
+            if score > best_score:
+                best_score = score
                 best_point_item = item
-                break
+
+        # 只有一个要点模板时直接采用，避免误配到完全无关的模板
+        if len(point_items) == 1:
+            best_point_item = point_items[0]
+
+    # 适用性门控：模板与本次会议内容不相关时，不套用它。
+    # 否则一通与模板无关的会议会被判成「所有必传要点都遗漏」，
+    # 用户看到的是「不合格 + 遗漏进度汇报/问题讨论」这类不相关结论。
+    template_rejected = False
+    template_relevance = None
+    if best_point_item is not None:
+        template_relevance = compute_semantic_similarity(
+            transcription_text, _template_text(best_point_item))
+        if template_relevance < POINT_TEMPLATE_MIN_RELEVANCE:
+            print(f'  [合规] 要点模板「{best_point_item.title}」与本次内容相关性过低'
+                  f'（{template_relevance:.2f} < {POINT_TEMPLATE_MIN_RELEVANCE}），不套用')
+            template_rejected = True
+            best_point_item = None
     
     covered_points = []
     point_time_markers = []
     all_required_points = []
-    
+
     if best_point_item:
-        points = json.loads(best_point_item.required_points) if best_point_item.required_points else []
-        keywords = json.loads(best_point_item.keywords) if best_point_item.keywords else []
+        points = _load_list(best_point_item.required_points)
+        keywords = _load_list(best_point_item.keywords)
         all_required_points = [p for p in points if p]
-        
-        point_keywords_map = {}
-        for kw in keywords:
-            if kw:
-                point_keywords_map[kw] = points
-        
-        for kw, kw_points in point_keywords_map.items():
-            kw_lower = kw.strip().lower()
-            if kw_lower in transcription_text.lower():
-                for point in kw_points:
-                    if point and point not in covered_points:
-                        covered_points.append(point)
-                
-                if transcription_segments:
-                    time_marker = find_point_time_marker(kw, transcription_segments)
-                    if time_marker:
-                        point_time_markers.append({
-                            'point': kw_points[0] if kw_points else kw,
-                            'keyword': kw,
-                            'source': best_point_item.title,
-                            'start_time': time_marker['start'],
-                            'end_time': time_marker['end'],
-                            'text': time_marker['text']
-                        })
+
+        # 逐个要点判定是否被覆盖。
+        # 旧实现把「任一关键词命中」映射成「该条目的全部要点都被覆盖」，
+        # 结果是一句话提到「通知」就让所有必传要点都算完成、missing_points
+        # 永远为空——遗漏事项检测这个核心功能等于失效。
+        # 现在按要点自身文本（或与要点同名的关键词）逐个匹配。
+        for point in all_required_points:
+            point_text = str(point).strip()
+            if not point_text:
+                continue
+
+            matched_keyword = None
+            if point_text.lower() in transcription_text.lower():
+                matched_keyword = point_text
+            else:
+                for kw in keywords:
+                    if kw == point_text and kw.lower() in transcription_text.lower():
+                        matched_keyword = kw
+                        break
+
+            if not matched_keyword:
+                continue
+
+            covered_points.append(point)
+            if transcription_segments:
+                time_marker = find_point_time_marker(matched_keyword, transcription_segments)
+                if time_marker:
+                    point_time_markers.append({
+                        'point': point_text,
+                        'keyword': matched_keyword,
+                        'source': best_point_item.title,
+                        'start_time': time_marker['start'],
+                        'end_time': time_marker['end'],
+                        'text': time_marker['text'],
+                    })
     
     if all_required_points:
         coverage_rate = len(covered_points) / len(all_required_points)
@@ -155,7 +232,7 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
     risk_categories = {}
     for item in active_items:
         if item.item_type in ['risk_keywords', 'forbidden']:
-            keywords = json.loads(item.keywords) if item.keywords else []
+            keywords = _load_list(item.keywords)
             for kw in keywords:
                 if kw:
                     all_risk_keywords.append(kw)
@@ -191,13 +268,13 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
     relevant_keywords = []
     if policy_similarities and best_policy_sim > 0.1:
         best_policy = policy_similarities[0][0]
-        keywords = json.loads(best_policy.keywords) if best_policy.keywords else []
+        keywords = _load_list(best_policy.keywords)
         relevant_keywords = [kw for kw in keywords if kw]
     
     if not relevant_keywords:
         # 如果没有相关政策，取所有关键词
         for item in active_items:
-            keywords = json.loads(item.keywords) if item.keywords else []
+            keywords = _load_list(item.keywords)
             relevant_keywords.extend(keywords)
     
     matched_keywords = []
@@ -213,7 +290,14 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
     
     # 生成建议
     suggestions = generate_suggestions(total_score, covered_points, all_required_points, risk_keywords_found)
-    
+    if template_rejected:
+        # 明确告知「没有适用的模板」，并给出可操作的方向，而不是让用户以为真的漏了一堆要点
+        suggestions.insert(0, (
+            f'本次会议内容与知识库中现有的必传要点模板相关性较低'
+            f'（{template_relevance:.2f}），未套用任何模板进行遗漏核查。'
+            '建议在知识库中按会议类型补充对应的必传要点模板。'
+        ))
+
     return {
         'total_score': round(total_score, 2),
         'components': score_components,
@@ -223,7 +307,10 @@ def calculate_compliance_score(transcription_text, knowledge_base_items, score_w
         'risk_keywords_found': risk_keywords_found,
         'risk_time_markers': risk_time_markers,
         'matched_keywords': matched_keywords,
-        'suggestions': suggestions
+        'suggestions': suggestions,
+        'point_template': None if best_point_item is None else best_point_item.title,
+        'point_template_rejected': template_rejected,
+        'point_template_relevance': None if template_relevance is None else round(template_relevance, 4),
     }
 
 
@@ -271,48 +358,105 @@ def assess_risk_severity(keyword):
 
 def is_negated_context(text, keyword, window=15):
     """
-    检查关键词是否在否定/禁止的语境中
-    如果关键词前面有禁止/不得/不能/不要/严禁/不允许等否定词，则不是风险
+    检查关键词是否在否定/禁止的语境中。
+    关键词前面出现禁止/不得/不能/不要/严禁/不允许等否定词时，说明是在强调
+    「不要这么做」，属于合规表述而不是风险内容。
     """
-    import re
-    
     negation_words = [
         '禁止', '不得', '不能', '不要', '严禁', '不允许', '不可以', '不准',
         '反对', '拒绝', '纠正', '不对', '错误', '不应该', '不应当',
         '必须避免', '不能有', '不允许有', '禁止使用', '禁止承诺',
         '不允许承诺', '不得承诺', '不得使用', '不可', '千万别',
         '绝对不能', '一定不要', '坚决禁止', '严格禁止',
+        # 英文语境同样需要识别，否则 "Do Not Use LIBOR" 会被判成风险
+        'do not', "don't", 'must not', 'should not', 'never', 'avoid',
+        'prohibited', 'forbidden', 'no ',
     ]
-    
-    keyword_pos = text.find(keyword)
+
+    # 命中判定统一做了小写归一化，这里也必须同样处理：否则英文/混合大小写
+    # 关键词（如 "LIBOR"）在禁止语境中 find 返回 -1，会被当成真实风险上报
+    lowered = text.lower()
+    keyword_pos = lowered.find(str(keyword).strip().lower())
     if keyword_pos == -1:
         return False
-    
-    prefix = text[max(0, keyword_pos - window * 2):keyword_pos]
-    
+
+    prefix = lowered[max(0, keyword_pos - window * 2):keyword_pos]
+
     for neg in negation_words:
         if neg in prefix:
             return True
-    
+
     negation_patterns = [
         r'.{0,10}(禁止|不得|不能|不要|严禁|不允许|不准|不可以).{0,5}$',
         r'.{0,10}(反对|拒绝|纠正|不对|错误).{0,5}$',
+        r'.{0,15}\b(do not|must not|should not|never)\b.{0,10}$',
     ]
     for pattern in negation_patterns:
         if re.search(pattern, prefix):
             return True
-    
+
     return False
+
+
+def _scan_risk_patterns(text, segments, patterns):
+    """
+    扫描风险句式，返回命中的风险条目。
+
+    旧实现的写法是「先全文 finditer 判断是否出现，再对每个句子重新 finditer」，
+    同一个命中会被重复累加（全文命中 N 次 × 句内命中 M 次，实测同一句话重复
+    三次会产生 9 条相同风险），导致 risk_detection 分数被重复扣到 0。
+    这里改为每条命中只计一次：有分句时按分句定位，没有分句时用全文定位。
+    """
+    risks = []
+    seen = set()
+
+    for pattern, category, severity in patterns:
+        if segments:
+            for seg in segments:
+                seg_text = seg.get('text', '') or ''
+                for match in re.finditer(pattern, seg_text):
+                    matched = match.group()
+                    if is_negated_context(seg_text, matched):
+                        continue
+                    key = (matched, category, seg.get('start_time', 0))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    risks.append({
+                        'keyword': matched,
+                        'category': category,
+                        'start_time': seg.get('start_time', 0),
+                        'end_time': seg.get('end_time', 0),
+                        'text': seg_text,
+                        'severity': severity,
+                    })
+        else:
+            for match in re.finditer(pattern, text):
+                matched = match.group()
+                if is_negated_context(text, matched):
+                    continue
+                key = (matched, category)
+                if key in seen:
+                    continue
+                seen.add(key)
+                risks.append({
+                    'keyword': matched,
+                    'category': category,
+                    'start_time': 0,
+                    'end_time': 0,
+                    'text': text[:50],
+                    'severity': severity,
+                })
+
+    return risks
 
 
 def detect_semantic_risks(text, segments=None):
     """
     语义层面的风险检测
     检测：偏离主题、表述不当、消极负面等内容
-    改进：区分禁止语境和实际使用，避免将合规培训内容误判为风险
+    区分禁止语境和实际使用，避免将合规培训内容误判为风险
     """
-    risks = []
-    
     inappropriate_patterns = [
         (r'肯定会赚|一定赚|稳赚|保本保收益|零风险|无风险|绝对安全', '表述不当', 'high'),
         (r'忽悠|骗|蒙|糊弄|坑', '表述不当', 'high'),
@@ -323,40 +467,7 @@ def detect_semantic_risks(text, segments=None):
         (r'客户傻|客户不懂|客户好忽悠', '表述不当', 'high'),
         (r'上级不知道|领导不会查|没人知道', '表述不当', 'high'),
     ]
-    
-    for pattern, category, severity in inappropriate_patterns:
-        import re
-        matches = re.finditer(pattern, text)
-        for match in matches:
-            matched_text = match.group()
-            if is_negated_context(text, matched_text):
-                continue
-            
-            if segments:
-                for seg in segments:
-                    seg_text = seg.get('text', '')
-                    seg_matches = list(re.finditer(pattern, seg_text))
-                    for seg_match in seg_matches:
-                        seg_matched = seg_match.group()
-                        if not is_negated_context(seg_text, seg_matched):
-                            risks.append({
-                                'keyword': seg_matched,
-                                'category': category,
-                                'start_time': seg.get('start_time', 0),
-                                'end_time': seg.get('end_time', 0),
-                                'text': seg_text,
-                                'severity': severity
-                            })
-            else:
-                risks.append({
-                    'keyword': matched_text,
-                    'category': category,
-                    'start_time': 0,
-                    'end_time': 0,
-                    'text': text[:50],
-                    'severity': severity
-                })
-    
+
     negative_sentiment_patterns = [
         (r'问题太多|麻烦不断|一团糟|混乱', '消极负面', 'high'),
         (r'没办法|无解|搞不定|束手无策', '消极负面', 'medium'),
@@ -364,41 +475,9 @@ def detect_semantic_risks(text, segments=None):
         (r'反对意见|抵制|拒绝执行', '消极负面', 'high'),
         (r'抱怨|不满|牢骚|指责', '消极负面', 'medium'),
     ]
-    
-    for pattern, category, severity in negative_sentiment_patterns:
-        import re
-        matches = re.finditer(pattern, text)
-        for match in matches:
-            matched_text = match.group()
-            if is_negated_context(text, matched_text):
-                continue
-            
-            if segments:
-                for seg in segments:
-                    seg_text = seg.get('text', '')
-                    seg_matches = list(re.finditer(pattern, seg_text))
-                    for seg_match in seg_matches:
-                        seg_matched = seg_match.group()
-                        if not is_negated_context(seg_text, seg_matched):
-                            risks.append({
-                                'keyword': seg_matched,
-                                'category': category,
-                                'start_time': seg.get('start_time', 0),
-                                'end_time': seg.get('end_time', 0),
-                                'text': seg_text,
-                                'severity': severity
-                            })
-            else:
-                risks.append({
-                    'keyword': matched_text,
-                    'category': category,
-                    'start_time': 0,
-                    'end_time': 0,
-                    'text': text[:50],
-                    'severity': severity
-                })
-    
-    return risks
+
+    return (_scan_risk_patterns(text, segments, inappropriate_patterns)
+            + _scan_risk_patterns(text, segments, negative_sentiment_patterns))
 
 
 def compute_semantic_similarity(text1, text2):
@@ -475,102 +554,96 @@ def generate_suggestions(total_score, covered_points, all_required_points, risk_
     return suggestions
 
 
-def generate_compliance_report(meeting_id, transcription_text, compliance_result):
-    """生成合规报告"""
-    report = {
-        'meeting_id': meeting_id,
-        'report_time': datetime.now().isoformat(),
-        'overall_score': compliance_result['total_score'],
-        'score_level': get_score_level(compliance_result['total_score']),
-        'detailed_scores': compliance_result['components'],
-        'summary': {
-            'covered_points_count': len(compliance_result['covered_points']),
-            'total_points_count': len(compliance_result['covered_points']) + len(compliance_result['missing_points']),
-            'risk_items_count': len(compliance_result['risk_keywords_found']),
-            'matched_keywords_count': len(compliance_result['matched_keywords'])
-        },
-        'covered_points': compliance_result['covered_points'],
-        'point_time_markers': compliance_result.get('point_time_markers', []),
-        'missing_points': compliance_result['missing_points'],
-        'risk_keywords': compliance_result['risk_keywords_found'],
-        'risk_time_markers': compliance_result.get('risk_time_markers', []),
-        'matched_keywords': compliance_result['matched_keywords'],
-        'suggestions': compliance_result['suggestions']
-    }
-    
-    return report
-
-
 def realtime_compliance_check(text_segment, knowledge_base_items, start_time, end_time):
     """
-    实时合规检查（用于WebSocket实时转写）
-    每收到一段转写文本就进行合规检查
-    
-    返回：
-        - 是否有风险内容
-        - 是否覆盖了必传要点
-        - 需要告警的内容
+    实时合规检查：对一段转写文本做风险与必传要点核查。
+
+    返回结构（与前端实时提示、第三方客户端约定一致）：
+        {
+          'has_risk': bool,
+          'risk_keywords': ['保本保收益', ...],           # 便于直接展示
+          'risk_items': [{'keyword','severity','start_time','end_time','text'}, ...],
+          'covered_points': [{'point','keyword','start_time','end_time'}, ...],
+          'alerts': [{'type','level','message','time'}, ...],
+          'start_time': float, 'end_time': float           # 本段文本的时间范围
+        }
     """
     active_items = [item for item in knowledge_base_items if item.status == 'active']
-    
+
     result = {
         'has_risk': False,
+        'risk_keywords': [],
         'risk_items': [],
         'covered_points': [],
-        'alerts': []
+        'alerts': [],
+        'start_time': start_time,
+        'end_time': end_time,
     }
-    
+
     if not active_items:
         return result
-    
+
     text_lower = text_segment.lower()
-    
-    # 检查风险关键词
+    seen_risk = set()
+    seen_points = set()
+
+    # 1. 风险关键词
     for item in active_items:
-        # 支持 risk_keywords 和 forbidden 类型
         if item.item_type in ['risk_keywords', 'forbidden']:
-            keywords = json.loads(item.keywords) if item.keywords else []
-            for kw in keywords:
-                if kw and kw.strip().lower() in text_lower:
-                    if is_negated_context(text_segment, kw):
-                        continue
-                    result['has_risk'] = True
-                    result['risk_items'].append({
-                        'keyword': kw,
-                        'start_time': start_time,
-                        'end_time': end_time,
-                        'text': text_segment,
-                        'severity': assess_risk_severity(kw)
-                    })
-    
-    # 检查必传要点 - 使用关键词匹配
+            for kw in _load_list(item.keywords):
+                if not kw or kw.strip().lower() not in text_lower:
+                    continue
+                if is_negated_context(text_segment, kw):
+                    continue
+                if kw in seen_risk:
+                    continue
+                seen_risk.add(kw)
+                result['has_risk'] = True
+                result['risk_keywords'].append(kw)
+                result['risk_items'].append({
+                    'keyword': kw,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'text': text_segment,
+                    'severity': assess_risk_severity(kw),
+                })
+
+    # 2. 必传要点：逐条判定，避免「命中一个关键词就把该条目的全部要点都算覆盖」
+    #    （旧实现会把所有要点一次性标记为已覆盖，实时提示因此失去意义）
     for item in active_items:
-        # 支持 required 和 key_points 两种类型
         if item.item_type in ['required', 'key_points']:
-            keywords = json.loads(item.keywords) if item.keywords else []
-            points = json.loads(item.required_points) if item.required_points else []
-            
-            for kw in keywords:
-                if kw and kw.strip().lower() in text_lower:
-                    # 关键词匹配成功，记录对应的要点
-                    for point in points:
-                        if point:
-                            result['covered_points'].append({
-                                'point': point,
-                                'keyword': kw,
-                                'start_time': start_time,
-                                'end_time': end_time
-                            })
-    
-    # 生成实时告警
-    if result['risk_items']:
-        high_risks = [r for r in result['risk_items'] if r['severity'] == 'high']
-        if high_risks:
-            result['alerts'].append({
-                'type': 'risk_alert',
-                'level': 'high',
-                'message': f'检测到高风险内容：{", ".join([r["keyword"] for r in high_risks])}',
-                'time': start_time
-            })
-    
+            keywords = _load_list(item.keywords)
+            points = _load_list(item.required_points)
+            for point in points:
+                if not point:
+                    continue
+                point_text = str(point).strip()
+                matched_keyword = None
+                if point_text.lower() in text_lower:
+                    matched_keyword = point_text
+                else:
+                    for kw in keywords:
+                        if kw == point_text and kw.strip().lower() in text_lower:
+                            matched_keyword = kw
+                            break
+                if not matched_keyword or point in seen_points:
+                    continue
+                seen_points.add(point)
+                result['covered_points'].append({
+                    'point': point,
+                    'keyword': matched_keyword,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                })
+
+    # 3. 高风险告警
+    high_risks = [r for r in result['risk_items'] if r['severity'] == 'high']
+    if high_risks:
+        result['alerts'].append({
+            'type': 'risk_alert',
+            'level': 'high',
+            'message': f'检测到高风险内容：{", ".join(r["keyword"] for r in high_risks)}',
+            'time': start_time,
+        })
+
     return result

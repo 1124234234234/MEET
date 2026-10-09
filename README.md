@@ -1,89 +1,347 @@
-# AI 语音识别与翻译系统
+# 会议室智能合规分析系统
 
-基于 OpenAI Whisper 的语音识别 API 服务，支持自动语言检测，并可将识别结果翻译成目标语言。
+面向会议室场景的语音/音频智能合规分析系统。输入一段会议录音，系统会把它转成
+**带说话人归属和时间戳的转写文本**，做完整的文本分析，并对照知识库给出
+**0-100 分的合规评分、必传要点覆盖情况与风险内容定位**。
 
-## 功能特性
+系统全程在 **CPU 上离线运行**：所有模型都从项目 `models/` 目录本地加载，
+运行期不需要访问 huggingface.co，也不需要 GPU。
 
-- 自动检测音频语言（支持中、英、日、韩、法、德、西、俄、阿、葡等 10+ 种语言）
-- 自动翻译识别结果（内置中↔英翻译）
-- RESTful API，方便集成到其他系统
-- 内置 Web Demo 页面，上传音频即可试用
-- 支持 Docker 一键部署
+---
 
-## 项目结构
+## 一、分析流水线
+
+一段音频会依次经过 7 个环节：
+
+| 环节 | 说明 | 主要实现 |
+| --- | --- | --- |
+| 1. 音频预处理 | 谱减降噪、80–7000Hz 带通、MMSE 语音增强、响度归一化 | `modules/audio_preprocessor.py` |
+| 2. 语音分段 | FunASR fsmn-VAD 细粒度分段，输出精确语音区间 | `modules/asr_engine.py` |
+| 3. 语音识别 | paraformer-large 识别 + ct-punc 标点恢复，支持热词增强 | `modules/asr_engine.py` |
+| 4. 说话人分离 | 声纹倒谱嵌入 + 余弦距离凝聚聚类，自动估计人数 | `modules/speaker_diarization.py` |
+| 5. 文本分析 | 关键词、主题、摘要、情绪、待办事项、决议结论 | `modules/text_analyzer.py` |
+| 6. 合规比对 | 语义相似度 + 必传要点覆盖 + 风险识别 → 0-100 评分 | `modules/compliance_checker.py` |
+| 7. 报告与归档 | 生成报告、会议记录与合规报告入库 | `modules/report_generator.py`、`modules/meeting_store.py` |
+
+说话人分离结果按「时间重叠最大」原则回填到每个识别分句上，因此最终转写是
+「谁在什么时候说了什么」的形式，风险内容也能按时间点定位。
+
+---
+
+## 二、识别引擎
+
+**FunASR 是主引擎（推荐，默认使用）**
+
+- 本地模型位于 `models/funasr/`：paraformer-large（识别）+ fsmn-vad（分段）+ ct-punc（标点）
+- **CPU 上实时率约 0.09**，比 Whisper medium 快一个数量级
+- **自带标点恢复模型**，不再用正则去猜标点
+- 支持**热词增强**（`hotword`）：热词表 = 配置里的行业词汇（`Config.ASR_HOTWORDS`）
+  **＋ 知识库里已有条目的关键词**，后者就是需求里说的「行业词汇库」，由你在知识库页面维护
+- **伪语音片段过滤**：VAD 偶尔把呼吸声/碰麦声当成语音，识别后会产生「有二十。」「I.」
+  这类不存在的句子。现在按「相对能量 < 语音中位数 45% 且时长 < 1.5 秒」丢弃这类片段
+
+**Whisper 是自动兜底引擎**
+
+- 当本地 FunASR 模型缺失或不可用时，引擎选择逻辑会自动切到 Whisper，
+  业务流程不中断（见 `modules/asr_engine.py` 的 `get_engine('auto')`）
+- Whisper 的转写结果会经过繁简转换后处理，避免输出繁体字
+- 实测中文准确率低于 FunASR（同一段通话里 FunASR 识别「中国人寿」正确，Whisper 给出
+  「中国人受/中国人设」），仅作兜底
+
+两个引擎返回统一的数据结构（全文 + 带时间戳的分句），上层流水线无需区分。
+
+### 音频预处理按信噪比自适应
+
+旧实现对每条音频都跑一整套（降噪 → 带通 → 语音增强 → 归一化）。实测这在**干净音频上
+反而把识别准确率拉低**，因为谱减与谱增益会削掉清音/辅音：
+
+| 处理方式 | 干净音频 CER | 加噪音频 CER（SNR 10dB） |
+| --- | --- | --- |
+| 不处理 | 4.11% / 4.55% | 43.15% / 45.45% |
+| 一整套（旧实现） | 23.29% / 8.59% | 39.04% / 23.23% |
+| 轻度：带通 + 归一化 | **2.05% / 4.55%** | 48.63% / 42.42% |
+| 降噪 + 归一化 | 11.64% / 9.09% | **34.25% / 21.72%** |
+
+两条链的交叉点约在 **20dB**，因此按估计信噪比选择处理强度：
+
+- 估计 SNR ≥ 20dB（干净）→ 轻度：带通 + 归一化
+- 估计 SNR < 20dB（含噪）→ 降噪 + 归一化
+
+「语音增强」与「降噪后再带通」保留为可用能力但默认不入链路：实测没有额外收益却增加耗时。
+调整后上传链路的转写字错误率从 8.59% / 23.29% 降到 **4.04% / 3.42%**。
+
+---
+
+## 三、说话人分离
+
+当前实现已经完全替换掉早期「每 32ms 帧做 MFCC 聚类」的方案（帧太短、方差极大、
+且聚类数目被硬编码偏向 3 人，导致 2 人会议被切碎、混串率高）。现在的做法是：
+
+1. 提取倒谱特征（MFCC 1–19 阶 + 一阶/二阶差分）并做 CMVN 归一化，抑制信道差异；
+2. 在语音区间内按 **1.5 秒窗、0.5 秒步长**把帧级特征池化为说话人嵌入向量（L2 归一化）；
+3. 用**余弦距离 + 凝聚层次聚类**分组，并靠**轮廓系数**自动选择说话人数量，不做人为偏向；
+4. 再做小簇归并、中值滤波平滑、碎段吸收，最后按首次发言顺序编号为 `SPEAKER_00`、`SPEAKER_01`……
+
+**实测结果**（需求目标是混淆率 < 5%）：
+
+| 测试场景 | 真实人数 | 识别人数 | 说话人混淆率 |
+| --- | --- | --- | --- |
+| 3 人会议 | 3 | 3 | **0.00%** |
+| 2 人会议 | 2 | 2 | **3.55%** |
+
+转写字错误率（CER）实测 **4.04%（3 人场景）/ 3.42%（2 人场景）**（走上传链路：自适应预处理 + 热词），
+满足 < 10% 的指标要求；逐句「谁说了什么」的说话人归属正确率 **100%（18/18 句）**。
+
+> 注意：这里的 CER 测的是**用户实际走的链路**（先自适应预处理再识别）。
+> 早期版本测的是原始音频，掩盖了「一刀切预处理把准确率拉低 5 倍」的问题
+> （2 人对话：原始 4.11% vs 旧链路 23.29%）。
+
+评测方式：先用 `tests/make_ground_truth_audio.py` 合成带精确说话人与时间标注的测试音频
+（3 人、2 人两个场景），再用 `modules/speaker_diarization.evaluate()` 计算
+逐帧正确率、混淆率与人数误差。两个场景的混淆率均低于 5% 的目标。
+
+> pyannote 是**可选增强**，默认关闭：它需要 `HF_TOKEN` 并且能联网下载模型，
+> 离线环境下会长时间重试卡住。启用方式：`set ENABLE_PYANNOTE=1`。
+
+---
+
+## 四、模型与离线加载
+
+模型全部放在项目根目录的 `models/` 下：
+
+| 目录 | 用途 |
+| --- | --- |
+| `models/funasr/` | ASR（paraformer-large）、VAD（fsmn-vad）、标点（ct-punc） |
+| `models/bge-small-zh-v1.5` | 句向量模型，用于语义相似度与主题语义匹配 |
+| `models/Qwen2.5-1.5B-Instruct` | 指令模型，用于生成会议摘要 |
+
+`modules/model_registry.py` 是统一的**本地模型装载中心**，设计要点：
+
+- **离线优先**：优先加载 `models/` 下的本地副本，本地存在时强制 `local_files_only`，
+  避免离线环境下反复向 HuggingFace 发请求后重试等待；
+- **全局单例**：同一个模型只加载一次，多个模块共享，避免重复占用内存；
+- **可降级**：模型不可用时返回 `None`，由调用方走降级分支，不让异常冒到业务流程外。
+
+因此本系统在**完全无外网**的环境下也能正常工作。
+
+---
+
+## 五、使用方式
+
+### 方式一：上传音频文件分析
+
+在 Web 页面上传音频文件，后端接口为 `POST /api/meetings`。
+分析在**后台线程异步执行**，前端通过 **Socket.IO** 接收 `analysis_progress` 进度事件
+（也可以用 `GET /api/meetings/<id>/progress` 轮询），完成后在页面上查看转写、
+说话人、文本分析与合规报告。
+
+### 方式二：实时转写
+
+在页面上点「开始实时转写」，浏览器采集麦克风 → 按静音断句 → 本地识别 → 边录边出文字。
+
+采集通道走**纯 HTTP**（`/api/realtime/start|chunk|stop|result`），只用浏览器自带的
+`getUserMedia` / `AudioContext` / `fetch`，**不需要任何外部脚本**。这样在完全离线
+（无法访问 CDN）的机器上也能用——旧实现依赖从 CDN 加载的 socket.io 客户端，
+离线时点击「开始实时转写」不会有任何反应。
+
+采集端会把**实际生效的采样率**上报给后端（浏览器常见 44.1k/48k），
+后端按真实采样率累计时长并重采样到 16kHz 识别，避免时长与时间戳错位。
+
+会议过程中：每段识别文本都会与知识库做一次**实时合规比对**，命中风险词或覆盖到
+必传要点时，页面上当场给出提示并标注发生时间（便于会议进行中提醒、会后按时间点回溯）。
+停止录音后会保存音频、做完整分析（含说话人分离与合规评分）并入库，
+页面轮询进度直到出结果；若全程没有有效语音，则提示「没有采集到有效语音内容」且不写库。
+
+> 服务端仍保留 Socket.IO 事件（见 `API_DOC.md` 4.3），供已有第三方客户端使用。
+
+### 第三方软件集成接口
+
+供外部系统调用的转写接口：
+
+```
+POST /api/v1/transcribe
+```
+
+- 请求体支持两种形式：
+  - `multipart/form-data`，音频字段名为 `audio`
+  - `application/json`，用 `audio_base64` 传 Base64 编码的音频
+- 可选参数：`language`（默认 `zh`）、`enable_compliance`（默认 `true`）、
+  `enable_diarization`（默认 `false`）
+- 返回 `data` 中包含：转写文本、分句、关键词、主题、摘要、情绪、
+  合规报告、说话人分段
+
+---
+
+## 六、快速开始
+
+### 启动
+
+**Windows 双击运行 `启动.bat`**（推荐）。启动器会依次完成：
+
+1. 检查 Python 版本（需要 3.10+）
+2. 检查依赖包是否齐全 —— 缺哪个包会直接打印对应的 `pip install` 命令
+3. 检查本地模型是否就位（FunASR 识别/分段/标点、句向量、摘要模型）
+4. 选一个空闲端口（默认取 `config.py` 的 `PORT`，被占用时自动顺延）
+5. 启动服务并等待就绪，然后自动打开浏览器
+
+模型在**后台线程预热**，服务端口立即可用，页面不会因为模型加载而打不开。
+
+常用参数：
+
+```bash
+启动.bat --check          # 只做环境自检，不启动服务
+启动.bat --port 8080      # 指定端口
+启动.bat --no-browser     # 不自动打开浏览器
+python launcher.py        # 等价于双击启动.bat
+python app.py             # 跳过前置检查，直接启动
+```
+
+服务监听端口以**控制台打印的地址**为准，启动后浏览器打开该地址即可进入 Web 页面。
+可用 `GET /api/health` 确认服务已就绪（返回体里还会给出各模型的可用状态）。
+
+### 部署环境要求
+
+- Python 3.10+（已验证 3.14.4）+ Windows
+- **CPU 即可**：torch 为 CPU 构建（`torch 2.12.0+cpu`），不需要 CUDA
+- **无需外网**：模型在 `models/` 本地加载
+- 依赖清单见 `requirements.txt`（已固定为 CPU 版 + 离线可用的组合）
+
+---
+
+## 七、项目结构
 
 ```
 voice-reco/
-├── Dockerfile          # Docker 镜像构建文件
-├── app.py              # Flask API 服务主程序
-├── index.html          # Web Demo 页面
-├── requirements.txt    # Python 依赖
-├── start.sh            # Linux/Mac 启动脚本
-└── start.bat           # Windows 启动脚本
+├── 启动.bat                一键启动（双击）
+├── launcher.py            启动器：环境自检 + 端口选择 + 就绪等待 + 打开浏览器
+├── start-local.bat        与「启动.bat」等价的兼容入口
+├── app.py                 Flask 应用入口：HTTP 路由与 Socket.IO 事件
+├── config.py              配置（端口、模型、评分权重、风险词等）
+├── database.py            SQLAlchemy 实例
+├── models.py              数据模型：Meeting / Transcription / KnowledgeBase / ComplianceReport / ScoreWeight
+├── voice_api_client.py    远端 voice-api 客户端（边缘分布式部署模式）
+├── requirements.txt       Python 依赖清单（CPU + 离线）
+├── templates/index.html   Web 页面
+├── models/                本地模型目录（funasr / bge / Qwen）
+├── data/                  SQLite 数据库存放目录
+├── uploads/               上传音频与生成的音频文件
+├── tests/                 测试与评测脚本
+└── modules/               业务模块
+    ├── audio_io.py               统一音频读写（解码 + 重采样 + 单声道），soundfile 优先、内置 ffmpeg 兜底
+    ├── model_registry.py         本地模型装载中心（离线优先、全局单例、缺失时返回 None）
+    ├── asr_engine.py             统一识别引擎：FunASR 优先 / Whisper 兜底 / 远端 voice-api，VAD 分段 + 热词
+    ├── audio_preprocessor.py     音频预处理（谱减降噪、带通、MMSE 语音增强、归一化）与音频质量报告
+    ├── speaker_diarization.py    说话人分离：声纹倒谱嵌入 + 余弦凝聚聚类，自动估计人数，并提供 evaluate 评测
+    ├── text_analyzer.py          文本分析：关键词、主题、摘要、情绪、extract_action_items 待办事项、extract_decisions 决议结论
+    ├── compliance_checker.py     合规比对：语义相似度 + 必传要点覆盖 + 风险识别，输出 0-100 评分与等级
+    ├── analysis_pipeline.py      音频分析流水线编排（带进度回调），供转写接口与实时转写后分析复用
+    ├── funasr_transcriber.py     实时转写（FunASR 流式）、实时合规提示与 Socket.IO 事件注册
+    ├── meeting_store.py          会议结果入库 + 表结构自愈（老库幂等补列）
+    ├── file_parser.py            政策文件解析（TXT / PDF / DOCX → 标题、关键词、必传要点）
+    ├── meeting_detector.py       参会人数统计与发言分布分析
+    ├── report_generator.py       报告生成：会议摘要报告、合规趋势报告的 HTML 输出
+    └── whisper_utils.py          Whisper 转写封装与繁简转换（OpenCC 修正繁体输出）
 ```
 
-## Docker 部署
+### 待办事项与决议结论
 
-### Windows 系统
+- **待办事项**：`modules/text_analyzer.py` 的 `extract_action_items()`，识别
+  「需要 / 必须 / 应该 / 要求」「负责 / 跟进 / 落实 / 执行」
+  「计划 / 预计 / 安排」「下周 / 下月 / 近期」等模式引导的句子。
+- **决议结论**：`extract_decisions()`，识别带主语的结论性表态（「会议决定 / 一致同意 /
+  表决通过 / 审议通过」等），并过滤疑问句、未定表述（「再决定 / 待定」）。
+  注意「通过」在中文里多数是「经由」之意（「通过他我了解到…」），
+  所以只有带主语或「表决通过 / 审议通过」这类无歧义形式才算决议。
 
-1. 确保已安装 Docker Desktop
-2. 双击运行 `start.bat` 脚本
+两者都会随会议一起存入数据库（`Meeting.action_items` / `Meeting.decisions`），
+在会议详情页与报表中展示，对应需求中的「自动提取待办事项和决议结论」。
 
-### Linux/Mac 系统
+### 摘要生成的两道防线
 
-1. 确保已安装 Docker
-2. 运行 `chmod +x start.sh && ./start.sh`
+1. **幻觉检测**：`_is_hallucinated()` 先查新闻式模板词（「报道 / 记者 / 证监会 / 《》」），
+   再用「3 字以上实体有多少不出现在原文」做粗筛。粗筛**只在长实体不少于 8 个时启用** ——
+   抽象式摘要本来就会引入原文没有的表达，样本太少时比例不可靠：
+   实测一段 166 字通话，摘要里只有 3 个长实体且都不在原文，ratio 冲到 1.0，
+   把一份完全正确的摘要误判成幻觉、退回粗糙的抽取式拼接。
+2. **第三人称改写**：只做**短语级**替换（「我认为」→「有观点认为」、「我们建议」→「会议建议」）。
+   不再做裸代词替换 —— 旧实现把「我 / 我们 / 咱们 / 大家」无条件全局替换，
+   会产生「**参会人员**这个方案还是比较实在的」「他之前在**发言者**这边配置了」这类错句。
 
-### 手动部署
+### 必传要点的适用性门控
+
+会议内容与知识库里的要点模板不相关时，**不套用该模板**、不虚报遗漏：
+
+| 模板 | 保险销售通话 | 理财合规文本 | 离题文本（装修） |
+| --- | --- | --- | --- |
+| 项目例会要点 | **0.44 → 不适用** | 0.59 | 0.49 |
+| 理财销售必传要点 | 0.52 | **0.72 → 适用** | 0.40 |
+
+阈值取 0.50（`compliance_checker.POINT_TEMPLATE_MIN_RELEVANCE`）。
+没有门控时，一通正常销售电话会被判成「不合格 + 遗漏进度汇报 / 问题讨论 / 下周计划 / 风险说明」；
+现在改为明确提示「未匹配到适用的模板，建议按会议类型补充」。
+
+---
+
+## 八、测试
 
 ```bash
-# 构建镜像
-docker build -t voice-recognition:latest .
-
-# 启动容器
-docker run -d --name voice-api -p 5000:5000 --memory=6g voice-recognition:latest
-
-# 查看日志
-docker logs voice-api
-
-# 健康检查
-curl http://localhost:5000/health
+python tests/run_all_tests.py                  # 全部测试（6 个文件，约 8 分钟）
+python tests/run_all_tests.py --with-text-models  # 连大模型摘要一起测（更吃内存）
+python tests/run_all_tests.py --quick          # 只跑语音链路与实时转写
+python tests/test_voice_pipeline.py            # 语音链路量化评测（含 CER / 混淆率）
+python tests/test_voice_pipeline.py --quick     # 跳过需要加载模型的重型用例
+python tests/test_realtime_http.py             # 实时转写 HTTP 接口端到端（页面使用）
+python tests/test_realtime.py                  # 实时转写 Socket.IO 兼容路径
+python tests/make_ground_truth_audio.py        # 重新生成带标注的测试音频
 ```
 
-## 使用 Web Demo
+> **内存要求**：每个测试进程都要自己加载一套模型（FunASR + 标点 + 句向量，
+> 开大模型摘要再加 Qwen2.5-1.5B），峰值约 5GB。因此：
+> - 跑测试前**请先停止服务**（服务同样占一套模型，两边一起会把内存吃光，
+>   表现为测试进程以原生崩溃码 `0xC0000005` 退出）
+> - 默认关闭大模型摘要以省下约 3GB（摘要退回 TextRank 抽取式，功能仍可用）；
+>   要连大模型摘要一起验证时加 `--with-text-models`
+> - 运行器会在开跑前检查可用内存与服务端口，不满足条件会直接给出提示
 
-API 启动后，直接用浏览器打开 http://localhost:5000 即可上传音频进行测试。
+`test_voice_pipeline.py` 会直接给出量化指标并判断是否达标，覆盖：
 
-## API 说明
+- 转写字错误率 CER 与实时率 RTF（目标 CER < 10%）
+- 说话人混淆率、人数误差、逐句说话人归属正确率（目标混淆率 < 5%）
+- 必传要点覆盖与遗漏检测（含「离题会议必须报出全部遗漏」的反例）
+- 风险重复计数、否定语境识别、异常知识库字段健壮性
+- 待办事项 / 决议结论提取、摘要生成、情绪三分类
+- 报表生成健壮性与 HTML 转义
+- HTTP 接口冒烟（健康检查、会议列表、合规自测、第三方转写接口）
 
-### 健康检查
-```
-GET /health
-```
+`test_realtime.py` 覆盖 Socket.IO 事件接线、分句时间戳单调性、时长按采样点精确计算、
+音频落盘、复用已有转写的完整分析与入库（含会议标题、说话人、时长）。
 
-### 语音识别
-```
-POST /transcribe
-Content-Type: multipart/form-data
+---
 
-参数：
-- audio: 音频文件（必填）
-- target_language: 目标语言代码（可选）
+## 九、接口速览
 
-响应：
-{
-  "transcribed_text": "转录文本",
-  "detected_language": "zh",
-  "language_name": "Chinese",
-  "translated_text": "翻译文本（如有）
-}
-```
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/health` | 健康检查，附带本地模型可用性 |
+| POST | `/api/meetings` | 上传音频，异步分析（返回 meeting_id） |
+| GET | `/api/meetings` | 会议列表，支持分页 / 状态 / 分数区间 / 日期区间筛选 |
+| GET | `/api/meetings/<id>` | 会议详情（转写、摘要、待办、决议、合规报告） |
+| GET | `/api/meetings/<id>/progress` | 分析进度 |
+| GET | `/api/meetings/<id>/participants` | 参会人数与发言分布 |
+| POST | `/api/meetings/test-analyze` | 文本合规自测（调试知识库配置） |
+| POST | `/api/meetings/test-summary` | 文本摘要 / 要点 / 决议自测 |
+| GET/POST/PUT/DELETE | `/api/knowledge-base` | 知识库维护（支持政策文件上传解析） |
+| GET/PUT | `/api/score-weights` | 合规评分权重配置 |
+| GET | `/api/reports/meeting-summary/<id>` | 会议纪要报表（HTML） |
+| GET | `/api/reports/compliance-trend` | 合规趋势报表（HTML） |
+| POST | `/api/v1/transcribe` | 第三方语音转写与合规分析 |
 
-### 支持的语言
-```
-GET /languages
-```
+---
 
-## 配置
+## 十、说明
 
-Whisper 模型大小可在 app.py 中修改（tiny / base / small / medium / large-v3-turbo），模型越大准确度越高，但耗时和内存占用也越大。
+- 合规评分由四项加权构成：语义相似度 40 分、必传要点覆盖 30 分、
+  风险识别 20 分、关键词匹配 10 分（权重可在知识库页面调整）。
+- 风险识别区分「禁止语境」——例如合规培训中说「禁止使用保本保收益这类表述」
+  不会被误判为风险内容。
+- 评分为 90 及以上为「优秀」，75 及以上为「良好」，60 及以上为「合格」，其余为「不合格」。
