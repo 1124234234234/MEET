@@ -5,11 +5,14 @@
   1. 语音链路量化评测（tests/test_voice_pipeline.py）
      - 转写字错误率、说话人混淆率、要点覆盖、风险去重、接口冒烟
      - 上传分析路径端到端（后台线程 + 应用上下文）
-  2. 实时转写 HTTP 接口端到端测试（tests/test_realtime_http.py）
+  2. 实时链路准确率评测（tests/test_realtime_accuracy.py）
+     - 按浏览器实际的 500ms 分块回放音频走实时转写，算 CER
+     - 纯静音不产生幻觉文本、分句时间戳与音频对齐
+  3. 实时转写 HTTP 接口端到端测试（tests/test_realtime_http.py）
      - 内置页面使用的 /api/realtime/* 全流程、48kHz 重采样、空会话、合规摘要
-  3. 实时转写 Socket.IO 兼容测试（tests/test_realtime.py）
+  4. 实时转写 Socket.IO 兼容测试（tests/test_realtime.py）
      - 事件接线、时间戳推进、时长计算、分析与入库
-  4. 历史模块单元测试（音频预处理 / 文本分析 / 合规检查）
+  5. 历史模块单元测试（音频预处理 / 文本分析 / 合规检查）
 
 内存说明：
     每个测试进程都要自己加载一套模型（FunASR 声纹识别 + 标点 + 句向量，
@@ -195,8 +198,8 @@ def main():
     else:
         env['ENABLE_TEXT_MODELS'] = 'true'
 
-    plans = [('test_voice_pipeline.py', 2400), ('test_realtime_http.py', 1800),
-             ('test_realtime.py', 1800)]
+    plans = [('test_voice_pipeline.py', 2400), ('test_realtime_accuracy.py', 1800),
+             ('test_realtime_http.py', 1800), ('test_realtime.py', 1800)]
     if not quick:
         plans += [('test_audio_preprocessor.py', 900), ('test_text_analyzer.py', 900),
                   ('test_compliance.py', 900)]

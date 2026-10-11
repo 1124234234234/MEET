@@ -13,6 +13,10 @@
     Socket.IO 的那套事件仍然保留（见 modules/funasr_transcriber.py），
     供已有第三方客户端继续使用；两条通道共用同一个转写会话实现。
 
+停止时不会直接把实时文本落库：实时文本是边说边出的中间结果，这里用整段
+录音按文件链路重转写一遍，会议记录与各项分析以重转写结果为准（见
+stop_session 中的说明）。
+
 会话状态放在进程内存里，适合单机部署（与本项目的部署形态一致）。
 """
 import base64
@@ -151,7 +155,7 @@ def stop_session(session_id, *, app, socketio=None, on_done=None):
         _results[session_id] = {
             'status': 'analyzing',
             'progress': 10,
-            'message': '正在分析...',
+            'message': '正在用完整录音重新识别...',
             'meeting_id': None,
             'result': None,
             'updated_at': time.time(),
@@ -175,14 +179,16 @@ def stop_session(session_id, *, app, socketio=None, on_done=None):
         result = dict(info)
         try:
             with app.app_context():
+                # 不传实时转写文本：实时文本是「边说边出」的中间结果（缓冲区
+                # 小、上下文短，碎片较多），这里用整段录音按文件链路重转写
+                # 一遍，会议记录、摘要、合规检查全部基于这份更准的文本；
+                # 实时文本只负责现场显示。重转写失败时自动退回实时文本。
                 analysis = analyze_audio(
                     audio_file_path,
                     language=transcriber.language,
                     knowledge_items=transcriber.knowledge_items,
                     score_weights=transcriber.score_weights,
                     progress_callback=progress,
-                    transcription_text=info['text'],
-                    transcriptions=info['transcriptions'],
                     enable_diarization=True,
                     hotwords=transcriber.hotwords,
                 )

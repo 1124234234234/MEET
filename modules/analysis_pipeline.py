@@ -89,13 +89,29 @@ def analyze_audio(
         else:
             from modules import asr_engine
 
-            _update(progress_callback, 10, '正在识别语音...')
+            _update(progress_callback, 10, '正在预处理音频...')
+            # 与上传链路（app._process_meeting_async）保持一致：先按信噪比
+            # 自适应预处理，再识别。实测「预处理 → 识别」的字错误率低于直接
+            # 识别原始音频（见 tests/test_voice_pipeline.py 的转写准确率用例），
+            # 因此对外接口与实时会议停止后的重转写都统一走这一步。
+            analysis_audio_path = audio_path
+            if not audio_path.endswith('_processed.wav'):
+                pre_path = audio_path.rsplit('.', 1)[0] + '_processed.wav'
+                try:
+                    from modules.audio_preprocessor import preprocess_audio
+
+                    preprocess_audio(audio_path, pre_path)
+                    if os.path.exists(pre_path):
+                        analysis_audio_path = pre_path
+                except Exception as exc:
+                    print(f'[分析流水线] 音频预处理失败，改用原始音频识别: {exc}')
+
             _update(progress_callback, 25, '正在分段与识别...')
             # 热词增强：知识库关键词 + 配置默认行业词汇（需求：行业词汇库热词解码）
             if hotwords is None:
                 hotwords = asr_engine.build_hotwords(knowledge_items)
             result = asr_engine.transcribe(
-                audio_path,
+                analysis_audio_path,
                 language=language,
                 hotwords=hotwords,
                 prefer=asr_engine_prefer or 'auto',
@@ -111,9 +127,6 @@ def analyze_audio(
             detected_language = result.get('language') or detected_language or language
             print(f'[分析流水线] 识别完成，引擎={result.get("engine")}，'
                   f'耗时 {time.time()-started:.1f}s，{len(segments)} 句')
-
-            # 非实时文本路径才需要预处理音频供后续质量报告对比
-            analysis_audio_path = audio_path
 
         if not full_text or not full_text.strip():
             _update(progress_callback, -1, '未识别到有效语音内容')

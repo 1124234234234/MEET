@@ -15,7 +15,9 @@
         'language': 语言代码,
         'engine': 引擎名称,
     }
-分句粒度直接来自 VAD 语音段，因此每个片段都带精确时间戳，可直接用于
+分句粒度来自 VAD 语音段：识别时把连续的语音片段并成「识别单元」一起解码
+（长上下文，准确率明显更高），再把文本按单元内部片段的比例还原成带时间戳的
+分句，因此每个片段都带精确时间戳，可直接用于
 "谁在什么时候说了什么" 以及后续按时间定位风险内容。
 """
 import os
@@ -32,7 +34,12 @@ MAX_SEGMENT_SECONDS = 15.0
 # 伪语音片段判据：相对能量低于本段录音语音中位数的该比例，且时长不超过阈值时丢弃
 NOISE_REL_RMS_RATIO = 0.45
 NOISE_MAX_SECONDS = 1.5
-# 分片之间的最小静音间隔（秒），用于把超长语音段切开时的估算
+# 识别单元合并参数（实测依据见 group_speech_regions）：相邻语音片段间隔小于
+# 该值视为同一段连续发言，合并成一个识别单元
+REGION_MERGE_GAP_SECONDS = 1.5
+# 单个识别单元时长上限（秒）。paraformer 按 60 秒窗口解码，这里与之对齐，
+# 超长单元在片段边界处断开，避免单次解码过长导致内存与延迟上升
+REGION_MERGE_MAX_SECONDS = 60.0
 DEFAULT_HOTWORDS = (
     '风险等级 投资限制 业绩提醒义务 风险告知书 合规 投资者适当性 '
     '录音录像 持证上岗 保本保收益 零风险 稳赚不赔'
@@ -115,12 +122,16 @@ def _energy_vad(y, sr, frame_ms=30, min_speech=0.3):
     return [(round(s, 3), round(e, 3)) for s, e in regions]
 
 
-def detect_speech_regions(audio_input, sr=DEFAULT_SR):
+def detect_speech_regions(audio_input, sr=DEFAULT_SR, fallback_full=True):
     """
     返回语音片段列表 [(start_sec, end_sec), ...]。
 
     优先使用本地 FunASR VAD（细粒度参数），否则退回能量 VAD。
     audio_input 可以是文件路径或 numpy 音频数组。
+
+    fallback_full=True 时，若完全没检测到语音则返回整段（用于文件转写，
+    宁可识别一遍也不丢内容）；实时转写传 False，这样整块是静音/纯噪声时
+    不会硬塞给识别模型（否则会吐出「分下。」这类幻觉文本）。
     """
     if isinstance(audio_input, np.ndarray):
         y = np.asarray(audio_input, dtype=np.float32)
@@ -146,10 +157,125 @@ def detect_speech_regions(audio_input, sr=DEFAULT_SR):
         regions = _energy_vad(y, sr)
 
     regions = _merge_short_regions(_split_long_regions(regions))
-    if not regions and duration > 0:
+    if not regions and duration > 0 and fallback_full:
         # 完全没有检测到语音时，整段作为一个片段，保证不会丢内容
         regions = [(0.0, round(duration, 3))]
     return regions
+
+
+def group_speech_regions(regions, max_gap=REGION_MERGE_GAP_SECONDS,
+                         max_span=REGION_MERGE_MAX_SECONDS):
+    """
+    把细粒度语音片段归组为「识别单元」。
+
+    背景（实测）：VAD 会把一句话中间的换气、以及背景音乐造成的电平起伏切成
+    0.3~1 秒的碎片，逐片送识别有两个代价：
+      1. 每片都缺少上下文，识别质量明显下降。同一段录音（太极教学视频外放，
+         30 秒）在细粒度切分下得到 24 句「到右。」「空心长。」这类碎片；
+         合并成 1~2 个单元后是连贯的整段文本。带标注音频上的字错误率
+         6.16% → 4.11%（gt_2spk）、4.55% → 4.04%（gt_meeting）。
+      2. 每片单独解码，30 秒音频耗时 17.0s，合并后只需 2.6s。
+
+    因此：与上一段间隔小于 max_gap 的片段并入同一识别单元，单元时长上限
+    max_span（超长则在片段边界处断开，paraformer 按 60 秒窗口解码）。
+
+    Returns:
+        [(unit_start, unit_end, [(s, e), ...]), ...]
+        第三个元素是该单元包含的原始片段，用于把识别文本按时间还原成
+        分句 —— 识别用长单元（上下文完整），落库仍要句子级时间戳。
+    """
+    units = []
+    for start, end in regions:
+        if units and (start - units[-1][1]) < max_gap and (end - units[-1][0]) <= max_span:
+            units[-1][1] = end
+            units[-1][2].append((start, end))
+        else:
+            units.append([start, end, [(start, end)]])
+    return [(round(s, 3), round(e, 3), parts) for s, e, parts in units]
+
+
+def merge_speech_regions(regions, max_gap=REGION_MERGE_GAP_SECONDS,
+                         max_span=REGION_MERGE_MAX_SECONDS):
+    """只取识别单元的时间范围（不关心单元内部片段）。"""
+    return [(start, end) for start, end, _ in group_speech_regions(regions, max_gap, max_span)]
+
+
+# 还原分句时允许切点偏离理想位置的比例：在理想切点附近找标点，让切点尽量落在句读处
+_SPLIT_PUNCTUATION = '，。！？；：、,.!?;:'
+_SPLIT_SEARCH_RATIO = 0.35
+# 句末标点：只有落到这些标点上，才认为一个分句说完了
+_SENTENCE_END = '。！？；…'
+# 单个分句的时长上限：长时间没有句末标点时（识别文本可能整段没标点）强制断开
+MAX_PIECE_SECONDS = 12.0
+
+
+def _snap_to_punctuation(text, ideal, lower):
+    """在理想切点附近找一个「标点之后」的位置，越近越好。"""
+    upper = len(text)
+    if ideal <= lower:
+        return lower
+    if ideal >= upper:
+        return upper
+    window = max(1, int((ideal - lower) * _SPLIT_SEARCH_RATIO))
+    for offset in range(window + 1):
+        for candidate in (ideal + offset, ideal - offset):
+            if lower < candidate < upper and text[candidate - 1] in _SPLIT_PUNCTUATION:
+                return candidate
+    return min(max(ideal, lower), upper)
+
+
+def _ends_sentence(text):
+    """该段文本是否已经说到句末（以句末标点结尾）。"""
+    stripped = (text or '').rstrip()
+    return bool(stripped) and stripped[-1] in _SENTENCE_END
+
+
+def _split_unit_text(text, parts):
+    """
+    把长识别单元的文本按各片段时长比例还原成带时间戳的分句。
+
+    1. 先按各片段时长比例把文本分到片段上（切点就近标点，不增删字符）；
+    2. 相邻片段只在「上一段文本已经说到句末」时才断开。
+
+    第 2 步是必须的：手机外放教学视频这类录音，背景音乐会把一句话切成
+    0.3 秒级的语音碎片，按碎片断句会得到「伸住自」「己的左手」这种半截
+    分句 —— 实测用户看到的「转写不准」正是这种碎片。按文本的句末标点
+    断句后，分句读起来才是完整的句子；时间戳仍取自片段边界，不受影响。
+
+    切点只做位置选择，不增删字符，因此拼回来与识别出的整段文本逐字相同。
+    """
+    if not parts:
+        return []
+    if len(parts) < 2 or not text:
+        return [(parts[0][0], parts[-1][1], text)]
+
+    durations = [max(end - start, 0.0) for start, end in parts]
+    total = sum(durations)
+    if total <= 0:
+        return [(parts[0][0], parts[-1][1], text)]
+
+    raw = []
+    cursor = 0
+    consumed = 0.0
+    for index, ((start, end), duration) in enumerate(zip(parts, durations)):
+        consumed += duration
+        if index == len(parts) - 1:
+            stop = len(text)
+        else:
+            ideal = int(round(len(text) * consumed / total))
+            stop = _snap_to_punctuation(text, ideal, cursor)
+        raw.append((start, end, text[cursor:stop]))
+        cursor = stop
+
+    merged = []
+    for start, end, piece in raw:
+        if merged and not _ends_sentence(merged[-1][2]) \
+                and (end - merged[-1][0]) <= MAX_PIECE_SECONDS:
+            previous = merged[-1]
+            merged[-1] = (previous[0], end, previous[2] + piece)
+            continue
+        merged.append((start, end, piece))
+    return merged
 
 
 def build_hotwords(knowledge_items=None, extra=None):
@@ -270,14 +396,17 @@ class FunASREngine:
                 print(f'[ASR] 丢弃疑似噪声片段 [{start:.2f}-{end:.2f}] '
                       f'时长 {duration:.2f}s 相对能量 {energy:.4f}')
 
+        # 把细粒度语音片段并成识别单元（长上下文），识别后再按单元内部片段
+        # 把文本还原成分句时间戳，见 group_speech_regions / _split_unit_text
+        units = group_speech_regions(regions)
         chunks = []
-        spans = []
-        for start, end in regions:
-            seg = audio[int(start * sr):int(end * sr)]
+        unit_parts = []
+        for unit_start, unit_end, parts in units:
+            seg = audio[int(unit_start * sr):int(unit_end * sr)]
             if len(seg) < int(0.05 * sr):
                 continue
             chunks.append(seg)
-            spans.append((start, end))
+            unit_parts.append(parts)
 
         if not chunks:
             return {'text': '', 'segments': [], 'language': language, 'engine': self.name}
@@ -298,17 +427,22 @@ class FunASREngine:
 
         segments = []
         texts = []
-        for span, item in zip(spans, results):
+        for parts, item in zip(unit_parts, results):
             text = (item.get('text') or '').strip()
             if not text:
                 continue
-            segments.append({
-                'start': round(float(span[0]), 2),
-                'end': round(float(span[1]), 2),
-                'text': text,
-                'confidence': 1.0,
-            })
-            texts.append(text)
+            for start, end, piece in _split_unit_text(text, parts):
+                # 分句文本去掉首尾空白用于展示，但拼回全文时保留原样，
+                # 保证 result['text'] 与识别输出逐字一致（CER 评测依赖）
+                texts.append(piece)
+                if not piece.strip():
+                    continue
+                segments.append({
+                    'start': round(float(start), 2),
+                    'end': round(float(end), 2),
+                    'text': piece.strip(),
+                    'confidence': 1.0,
+                })
 
         return {
             'text': ''.join(texts),

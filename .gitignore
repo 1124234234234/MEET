@@ -44,3 +44,7 @@ temp_*.wav
 *.ogg
 *.amr
 *.wma
+
+# 本地备份（源码快照，保留在本地即可）
+backup/
+backup_*.zip
