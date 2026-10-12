@@ -70,6 +70,21 @@
         .timeline { font-size: 12px; color: #999; margin-right: 8px; }
         .risk-item { background: #fff1f0; color: #ff4d4f; padding: 4px 12px; border-radius: 4px; font-size: 12px; }
         .missing-item { background: #fffbe6; color: #faad14; padding: 4px 12px; border-radius: 4px; font-size: 12px; }
+        /* 会议文档预览：按公文样式排版（标题居中、信息项对齐、章节标题加粗） */
+        .doc-preview { padding: 8px 20px 24px; max-height: 66vh; overflow-y: auto; line-height: 1.9; font-size: 14px; color: #333; }
+        .doc-preview h1 { font-size: 22px; text-align: center; margin: 12px 0 20px; letter-spacing: 2px; }
+        .doc-preview h2 { font-size: 16px; margin: 20px 0 8px; color: #1890ff; }
+        .doc-preview h3 { font-size: 15px; margin: 16px 0 6px; }
+        .doc-preview p { margin: 6px 0; }
+        .doc-preview ul, .doc-preview ol { margin: 6px 0 6px 22px; }
+        .doc-preview li { margin: 2px 0; }
+        .doc-preview table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+        .doc-preview th, .doc-preview td { border: 1px solid #e8e8e8; padding: 6px 10px; font-size: 13px; text-align: left; }
+        .doc-preview th { background: #fafafa; width: 140px; }
+        .doc-preview blockquote { border-left: 3px solid #d9d9d9; color: #888; padding-left: 12px; margin: 10px 0; font-size: 13px; }
+        .doc-preview hr { border: none; border-top: 1px dashed #d9d9d9; margin: 18px 0; }
+        .doc-preview strong { color: #111; }
+        .doc-preview .doc-line { white-space: pre-wrap; }
     </style>
 </head>
 <body>
@@ -416,6 +431,25 @@
         </div>
     </div>
 
+    <div class="modal" id="doc-preview-modal">
+        <div class="modal-content" style="max-width: 900px;">
+            <div class="modal-header">
+                <h3 id="doc-preview-title">文档预览</h3>
+                <button class="modal-close" onclick="closeDocPreview()">×</button>
+            </div>
+            <div style="padding: 8px 20px 4px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+                        border-bottom:1px solid #f0f0f0;">
+                <span id="doc-preview-path" style="color:#999; font-size:12px; word-break:break-all;"></span>
+                <span style="flex:1;"></span>
+                <button class="btn btn-secondary" id="doc-preview-switch"
+                        onclick="switchDocPreview()">切换到另一份</button>
+                <button class="btn btn-secondary" onclick="revealDocuments(currentMeetingId)">📂 打开所在文件夹</button>
+                <a class="btn btn-primary" id="doc-preview-download" href="#" target="_blank">下载</a>
+            </div>
+            <div id="doc-preview-body" class="doc-preview"></div>
+        </div>
+    </div>
+
     <div class="modal" id="edit-meeting-modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -427,6 +461,21 @@
                 <div class="form-group">
                     <label>会议标题</label>
                     <input type="text" id="edit-meeting-title" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label>会议地点（写入会议纪要，可留空）</label>
+                    <input type="text" id="edit-meeting-location" class="form-control"
+                           placeholder="例如：三楼会议室">
+                </div>
+                <div class="form-group">
+                    <label>主持人（写入会议纪要，可留空）</label>
+                    <input type="text" id="edit-meeting-host" class="form-control"
+                           placeholder="例如：张三">
+                </div>
+                <div class="form-group">
+                    <label>记录人（写入会议纪要，默认由系统署名）</label>
+                    <input type="text" id="edit-meeting-recorder" class="form-control"
+                           placeholder="例如：李四">
                 </div>
                 <div class="form-group">
                     <label>会议摘要</label>
@@ -503,10 +552,201 @@
             window.open(`${API_BASE}/reports/meeting-summary/${currentMeetingId}`, '_blank');
         }
 
-        // ---------------- 会议文档（会议纪要 / 会议记录概要） ----------------
+        // ---------------- 会议文档（会议纪要 / 会议记录概要 / 记录全文） ----------------
 
         function documentLink(meetingId, kind) {
             return `${API_BASE}/meetings/${meetingId}/documents/${kind}`;
+        }
+
+        const DOC_KIND_LABEL = {
+            minutes: '会议纪要',
+            summary: '会议记录概要',
+            transcript: '会议记录全文'
+        };
+
+        function escapeHtml(text) {
+            return String(text === undefined || text === null ? '' : text)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function inlineMd(text) {
+            // 只处理我们自己生成的 Markdown：**加粗** 与 `代码`
+            return escapeHtml(text)
+                .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                .replace(/`([^`]+)`/g, '<code>$1</code>');
+        }
+
+        // 极简 Markdown 渲染（标题 / 表格 / 列表 / 引用 / 分隔线 / 加粗）。
+        // 不引外部库：离线环境加载不到 CDN 上的 marked/remark，文档页会白屏。
+        function renderMarkdown(markdown) {
+            const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+            let html = '';
+            let listType = null;
+            let tableRows = [];
+            let paragraph = [];
+
+            const flushParagraph = () => {
+                if (paragraph.length) {
+                    html += `<p>${inlineMd(paragraph.join(' '))}</p>`;
+                    paragraph = [];
+                }
+            };
+            const flushList = () => {
+                if (listType) {
+                    html += `</${listType}>`;
+                    listType = null;
+                }
+            };
+            const flushTable = () => {
+                if (!tableRows.length) return;
+                html += '<table>';
+                tableRows.forEach((cells, index) => {
+                    if (index === 1 && cells.every(c => /^-{2,}$/.test(c.replace(/[: ]/g, '')))) {
+                        return; // 表头分隔行
+                    }
+                    const tag = index === 0 ? 'th' : 'td';
+                    html += '<tr>' + cells.map(c => `<${tag}>${inlineMd(c)}</${tag}>`).join('') + '</tr>';
+                });
+                html += '</table>';
+                tableRows = [];
+            };
+
+            lines.forEach((rawLine) => {
+                const line = rawLine.trim();
+                if (!line) {
+                    flushParagraph();
+                    flushList();
+                    flushTable();
+                    return;
+                }
+                if (line.startsWith('|')) {
+                    flushParagraph();
+                    flushList();
+                    tableRows.push(line.replace(/^\||\|$/g, '').split('|').map(c => c.trim()));
+                    return;
+                }
+                flushTable();
+                if (/^#{1,6}\s/.test(line)) {
+                    flushParagraph();
+                    flushList();
+                    const level = line.match(/^#+/)[0].length;
+                    html += `<h${level}>${inlineMd(line.replace(/^#+\s*/, ''))}</h${level}>`;
+                    return;
+                }
+                if (/^(---+|\*\*\*+)$/.test(line)) {
+                    flushParagraph();
+                    flushList();
+                    html += '<hr>';
+                    return;
+                }
+                if (line.startsWith('>')) {
+                    flushParagraph();
+                    flushList();
+                    html += `<blockquote>${inlineMd(line.replace(/^>\s*/, ''))}</blockquote>`;
+                    return;
+                }
+                const orderedMatch = line.match(/^(\d+)\.\s+(.*)$/);
+                if (orderedMatch) {
+                    flushParagraph();
+                    if (listType !== 'ol') {
+                        flushList();
+                        html += '<ol>';
+                        listType = 'ol';
+                    }
+                    html += `<li>${inlineMd(orderedMatch[2])}</li>`;
+                    return;
+                }
+                if (line.startsWith('- ') || line.startsWith('* ')) {
+                    flushParagraph();
+                    if (listType !== 'ul') {
+                        flushList();
+                        html += '<ul>';
+                        listType = 'ul';
+                    }
+                    html += `<li>${inlineMd(line.slice(2))}</li>`;
+                    return;
+                }
+                flushList();
+                // 形如「会议名称：xxx」的公文信息项单独成行、保留全角空格缩进
+                paragraph.push(rawLine);
+            });
+            flushParagraph();
+            flushList();
+            flushTable();
+            return html;
+        }
+
+        let docPreviewState = {meetingId: null, order: [], index: 0, contents: {}, directory: ''};
+
+        async function openDocPreview(meetingId, kind) {
+            const modal = document.getElementById('doc-preview-modal');
+            const body = document.getElementById('doc-preview-body');
+            document.getElementById('doc-preview-title').textContent = '文档预览';
+            body.innerHTML = '<p style="color:#999;">加载中...</p>';
+            modal.classList.add('show');
+            try {
+                const response = await fetch(`${API_BASE}/meetings/${meetingId}/documents`);
+                const payload = await response.json();
+                const data = payload.data || {};
+                docPreviewState = {
+                    meetingId: meetingId,
+                    contents: data.contents || {},
+                    directory: data.directory || '',
+                    order: (data.files || []).filter(f => f.exists).map(f => f.kind)
+                };
+                if (!docPreviewState.order.length) {
+                    body.innerHTML = '<p style="color:#ff4d4f;">该会议还没有生成文档。</p>';
+                    return;
+                }
+                const start = docPreviewState.order.indexOf(kind);
+                docPreviewState.index = start >= 0 ? start : 0;
+                renderDocPreview();
+            } catch (error) {
+                body.innerHTML = `<p style="color:#ff4d4f;">加载失败：${escapeHtml(error.message || error)}</p>`;
+            }
+        }
+
+        function renderDocPreview() {
+            const state = docPreviewState;
+            const kind = state.order[state.index];
+            const content = state.contents[kind] || '';
+            document.getElementById('doc-preview-title').textContent =
+                `${DOC_KIND_LABEL[kind] || kind} · 预览`;
+            document.getElementById('doc-preview-path').textContent =
+                `本地路径（可直接在资源管理器打开）：${state.directory}`;
+            document.getElementById('doc-preview-body').innerHTML = renderMarkdown(content);
+            const download = document.getElementById('doc-preview-download');
+            download.href = documentLink(state.meetingId, kind);
+            download.textContent = `下载${DOC_KIND_LABEL[kind] || ''}`;
+            document.getElementById('doc-preview-switch').style.display =
+                state.order.length > 1 ? '' : 'none';
+        }
+
+        function switchDocPreview() {
+            const state = docPreviewState;
+            if (state.order.length < 2) return;
+            state.index = (state.index + 1) % state.order.length;
+            renderDocPreview();
+        }
+
+        function closeDocPreview() {
+            document.getElementById('doc-preview-modal').classList.remove('show');
+        }
+
+        async function revealDocuments(meetingId) {
+            if (!meetingId) return;
+            try {
+                const response = await fetch(`${API_BASE}/meetings/${meetingId}/documents/reveal`, {
+                    method: 'POST'
+                });
+                const payload = await response.json();
+                const data = payload.data || {};
+                if (!data.opened) {
+                    alert('文档目录：\n' + (data.directory || ''));
+                }
+            } catch (error) {
+                alert('打开目录失败：' + (error.message || error));
+            }
         }
 
         async function loadMeetingDocuments(includeMissing = true) {
@@ -524,37 +764,45 @@
                         + '完成一次会议分析后会自动生成。</span>';
                     return;
                 }
-                let html = `<p style="color:#666; font-size:13px;">共 ${data.total} 场会议</p>`;
+                let html = `<p style="color:#666; font-size:13px;">共 ${data.total} 场会议 · `
+                     + `文档根目录：<code>${escapeHtml(data.root || '')}</code>`
+                     + `（在项目目录下，按「年-月 / 日期_标题_会议id」分层）</p>`;
                 months.forEach((month) => {
                     html += `<div style="margin-bottom:18px;">`
                          + `<h4 style="margin-bottom:8px; color:#1890ff;">📅 ${month.month}`
                          + `（${month.meetings.length} 场）</h4>`;
                     month.meetings.forEach((meeting) => {
                         const docs = (meeting.documents || []).map((doc) => {
-                            const label = doc.kind === 'minutes' ? '会议纪要' : '会议记录概要';
+                            const label = DOC_KIND_LABEL[doc.kind] || doc.name;
                             if (!doc.exists) {
                                 return `<span style="color:#bbb;">${label}（未生成）</span>`;
                             }
-                            return `<a href="${documentLink(meeting.meeting_id, doc.kind)}"`
-                                + ` style="color:#1890ff;">${label}（${Math.max(1, Math.round(doc.size / 1024))} KB）</a>`;
-                        }).join(' ｜ ');
+                            return `<button class="btn btn-secondary" style="padding:2px 10px; font-size:12px;"`
+                                + ` onclick="openDocPreview(${meeting.meeting_id}, '${doc.kind}')">`
+                                + `预览 ${label}</button>`
+                                + ` <a href="${documentLink(meeting.meeting_id, doc.kind)}"`
+                                + ` style="color:#1890ff; font-size:12px;">下载</a>`;
+                        }).join(' &nbsp; ');
                         html += `<div style="padding:8px 0; border-bottom:1px solid #f0f0f0;">`
-                             + `<div><strong>${meeting.title}</strong>`
+                             + `<div><strong>${escapeHtml(meeting.title)}</strong>`
                              + `<span style="color:#999; font-size:12px; margin-left:8px;">`
                              + `${meeting.date} · ${meeting.duration} 秒`
                              + `${meeting.score !== null && meeting.score !== undefined ? ' · 合规 ' + meeting.score.toFixed(1) + ' 分' : ''}`
                              + `</span></div>`
-                             + `<div style="font-size:13px; margin-top:4px;">${docs}</div>`
-                             + `<div style="color:#bbb; font-size:12px;">${meeting.directory}</div>`
+                             + `<div style="font-size:13px; margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${docs}</div>`
+                             + `<div style="color:#bbb; font-size:12px; margin-top:4px;">📁 ${escapeHtml(meeting.directory)}</div>`
                              + `</div>`;
                     });
                     html += `</div>`;
                 });
                 box.innerHTML = html;
             } catch (error) {
-                box.innerHTML = `<span style="color:#ff4d4f;">加载失败：${error.message || error}</span>`;
+                box.innerHTML = `<span style="color:#ff4d4f;">加载失败：${escapeHtml(error.message || error)}</span>`;
             }
         }
+
+        // 文档根目录（由 /api/documents 返回，页面加载时取一次用于说明文字）
+        let documentRootPath = '';
 
         async function regenerateAllDocuments() {
             await loadMeetingDocuments(true);
@@ -1310,6 +1558,9 @@
 
             document.getElementById('edit-meeting-id').value = data.id;
             document.getElementById('edit-meeting-title').value = data.title || '';
+            document.getElementById('edit-meeting-location').value = data.location || '';
+            document.getElementById('edit-meeting-host').value = data.host || '';
+            document.getElementById('edit-meeting-recorder').value = data.recorder || '';
             document.getElementById('edit-meeting-summary').value = data.summary || '';
             document.getElementById('edit-meeting-score').value = data.total_score || '';
 
@@ -1324,6 +1575,9 @@
             const id = document.getElementById('edit-meeting-id').value;
             const data = {
                 title: document.getElementById('edit-meeting-title').value,
+                location: document.getElementById('edit-meeting-location').value,
+                host: document.getElementById('edit-meeting-host').value,
+                recorder: document.getElementById('edit-meeting-recorder').value,
                 summary: document.getElementById('edit-meeting-summary').value,
                 total_score: parseFloat(document.getElementById('edit-meeting-score').value) || 0
             };
@@ -1432,18 +1686,21 @@
                 <div style="margin-bottom:20px; padding:12px; background:#fffbe6; border-radius:8px; border-left:4px solid #faad14;">
                     <h4 style="margin-bottom:8px;">📄 会议文档</h4>
                     <p style="font-size:13px; color:#666; margin-bottom:8px; line-height:1.7;">
-                        系统已把这场会议写成两份文件，按日期归档到
-                        <code>records/&lt;年-月&gt;/&lt;日期_标题_id&gt;/</code>：
-                        会议纪要（含讨论内容、决议、待办、合规提示与转写全文）和会议记录概要（一页速览）。
+                        系统按公文格式自动整理了三份文件，按日期归档到
+                        <code>records/&lt;年-月&gt;/&lt;日期_标题_id&gt;/</code>（项目目录下）：
+                        <strong>会议纪要</strong>（会议名称/时间/地点/主持人/出席人员/记录人 +
+                        会议概况、听取的发言、会议决定、会议要求、合规提示、落款）、
+                        <strong>会议记录概要</strong>（一页速览）、
+                        <strong>会议记录全文</strong>（逐字转写，带说话人与时间）。
                     </p>
                     <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                        <a class="btn btn-primary" target="_blank"
-                           href="${documentLink(data.id, 'minutes')}">📝 下载会议纪要</a>
-                        <a class="btn btn-secondary" target="_blank"
-                           href="${documentLink(data.id, 'summary')}">📋 下载会议记录概要</a>
-                        <button class="btn btn-secondary"
-                                onclick="regenerateDocuments(${data.id})">重新生成</button>
+                        <button class="btn btn-primary" onclick="openDocPreview(${data.id}, 'minutes')">📖 预览会议纪要</button>
+                        <button class="btn btn-secondary" onclick="openDocPreview(${data.id}, 'summary')">预览概要</button>
+                        <button class="btn btn-secondary" onclick="openDocPreview(${data.id}, 'transcript')">预览全文</button>
+                        <button class="btn btn-secondary" onclick="revealDocuments(${data.id})">📂 打开所在文件夹</button>
+                        <button class="btn btn-secondary" onclick="regenerateDocuments(${data.id})">重新生成</button>
                     </div>
+                    ${data.documents_dir ? `<div style="color:#999; font-size:12px; margin-top:8px; word-break:break-all;">📁 ${escapeHtml(data.documents_dir)}</div>` : ''}
                 </div>
                 <div style="margin-bottom:20px;">
                     <h4>基本信息</h4>

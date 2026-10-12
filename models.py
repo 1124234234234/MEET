@@ -22,6 +22,10 @@ class Meeting(db.Model):
     audio_quality = db.Column(db.Text)
     # 会议文档目录（会议纪要 / 会议记录概要两份文件的落盘位置）
     documents_dir = db.Column(db.String(500))
+    # 会议纪要的公文要素（可人工补充；留空时纪要里显示「（待补充）」）
+    location = db.Column(db.String(255))
+    host = db.Column(db.String(128))
+    recorder = db.Column(db.String(128))
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, onupdate=datetime.now)
 
@@ -47,6 +51,9 @@ class Meeting(db.Model):
             'decisions': json.loads(self.decisions) if self.decisions else [],
             'audio_quality': json.loads(self.audio_quality) if self.audio_quality else None,
             'documents_dir': self.documents_dir or '',
+            'location': self.location or '',
+            'host': self.host or '',
+            'recorder': self.recorder or '',
             'created_at': self.created_at.isoformat()
         }
 

@@ -1,12 +1,17 @@
 """
-会议文档生成：把一场会议写成两份文件，按日期分类存放，方便查阅。
+会议文档生成：把一场会议写成三份文件，按日期分类存放，方便查阅与归档。
 
-产出的两份文件（需求：「会议记录概要和纪要两个需要生成对应文件」）：
+产出的文件（需求：「会议记录概要和纪要两个需要生成对应文件」）：
 
-    会议纪要.md      正式纪要：会议基本信息 + 会议概况 + 讨论要点 +
-                     决议结论 + 待办事项 + 合规与风险提示 + 转写全文（附）
-    会议记录概要.md  速览：一页表格列出时间/时长/参会人/评分/主题/关键词/
-                     情绪 + 摘要 + 待办与决议清单
+    会议纪要.md      正式纪要，按公文通用格式：
+                     标题 + 会议名称/时间/地点/主持人/出席人员/记录人/会议议题
+                     + 一、会议概况 + 二、会议听取了下列发言 + 三、会议决定
+                     + 四、会议要求 + 五、合规与风险提示 + 落款
+                     （引导语用「会议听取了/会议决定/会议要求/会议强调」这套公文写法，
+                      不含逐字全文 —— 全文另存为会议记录，不混进纪要）
+    会议记录概要.md  速览：一页表格列出时间/时长/参会人/评分/主题/关键词/情绪
+                     + 摘要 + 待办与决议清单
+    会议记录全文.md  逐字记录：按说话人与时间排列的转写全文（纪要的附件）
 
 存储结构（按日期分月，一眼能找到某天的会）：
 
@@ -15,6 +20,7 @@
         2026-10-12_合规培训会议_98/
           会议纪要.md
           会议记录概要.md
+          会议记录全文.md
 
 文件名由「日期_标题_会议id」组成：标题里的 Windows 非法字符会被替换，
 再带 id 保证重名会议不会互相覆盖。文件用 UTF-8 with BOM 写盘，
@@ -39,6 +45,19 @@ MAX_TITLE_IN_NAME = 30
 
 MINUTES_NAME = '会议纪要.md'
 SUMMARY_NAME = '会议记录概要.md'
+TRANSCRIPT_NAME = '会议记录全文.md'
+# 三类文档（kind → 文件名），接口与前端按这个顺序展示
+DOCUMENT_KINDS = (
+    ('minutes', MINUTES_NAME),
+    ('summary', SUMMARY_NAME),
+    ('transcript', TRANSCRIPT_NAME),
+)
+# 带日期的中文时间戳（公文体里用「2026年10月12日 15时30分」）
+_MOMENT_PLACEHOLDER = '（待补充）'
+_RECORDER_FALLBACK = '会议室智能合规分析系统（自动转写）'
+# 公文分条用中文序号
+_CN_NUMBERS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+               '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十']
 
 
 def _as_list(value):
@@ -214,7 +233,8 @@ def build_summary_document(meeting, transcriptions, compliance=None):
 
     lines.append('')
     lines.append('---')
-    lines.append(f'*本文件由会议室智能合规分析系统自动生成于 {datetime.now().strftime("%Y-%m-%d %H:%M")}*')
+    lines.append(f'*本文件由会议室智能合规分析系统自动生成于 {datetime.now().strftime("%Y-%m-%d %H:%M")}，'
+                 f'与《会议纪要》《会议记录全文》同目录存放。*')
     return '\n'.join(lines) + '\n'
 
 
@@ -238,10 +258,28 @@ def _discussion_points(transcriptions, compliance=None, max_points=12):
 
 
 def build_minutes_document(meeting, transcriptions, compliance=None):
-    """会议纪要：正式文书（结构参考公开的会议纪要模板）。"""
+    """
+    会议纪要：按公文通用格式撰写。
+
+    结构来自公开的公文写作规范（会议纪要由「标题 + 会议组织情况 + 会议内容 + 落款」构成，
+    会议内容用「会议听取了 / 会议认为 / 会议决定 / 会议要求」这类引导语分条列出，
+    纪要是概括性文书，逐字全文不入纪要、另存《会议记录全文》）：
+
+        标题：×××会议纪要
+        会议名称 / 时间 / 地点 / 主持人 / 出席人员 / 列席人员 / 缺席人员 / 记录人 / 会议议题
+        一、会议概况          —— 会议召开情况与总体内容
+        二、会议听取了下列发言 —— 发言提要法：按发言人整理发言要点
+        三、会议决定          —— 议定事项，分条列述
+        四、会议要求          —— 落实要求与任务分工
+        五、合规与风险提示    —— 本系统的合规比对结论
+        落款                  —— 整理单位 + 成文日期
+    """
     title = getattr(meeting, 'title', '') or '未命名会议'
     created = getattr(meeting, 'date', None) or getattr(meeting, 'created_at', None)
-    created_text = created.strftime('%Y年%m月%d日 %H:%M') if isinstance(created, datetime) else ''
+    created_text = (created.strftime('%Y年%m月%d日 %H时%M分')
+                    if isinstance(created, datetime) else _MOMENT_PLACEHOLDER)
+    stamp_date = (created.strftime('%Y年%m月%d日')
+                  if isinstance(created, datetime) else datetime.now().strftime('%Y年%m月%d日'))
     duration = getattr(meeting, 'duration', 0) or 0
 
     actions = [str(a) for a in _as_list(getattr(meeting, 'action_items', None))]
@@ -250,6 +288,7 @@ def build_minutes_document(meeting, transcriptions, compliance=None):
               for t in _as_list(getattr(meeting, 'topics', None))]
     keywords = [str(k.get('word') if isinstance(k, dict) else k)
                 for k in _as_list(getattr(meeting, 'keywords', None))]
+    topic_text = '、'.join(topics[:5]) if topics else '（待补充）'
 
     speakers = {}
     for seg in transcriptions or []:
@@ -257,55 +296,83 @@ def build_minutes_document(meeting, transcriptions, compliance=None):
         info = speakers.setdefault(speaker, {'count': 0, 'chars': 0})
         info['count'] += 1
         info['chars'] += len(seg.get('text') or '')
-    speaker_parts = []
-    for name, info in sorted(speakers.items()):
-        share = (info['chars'] / max(1, sum(v['chars'] for v in speakers.values()))) * 100
-        speaker_parts.append(f'{name}（发言 {info["count"]} 句，占 {share:.0f}%）')
+    total_chars = max(1, sum(v['chars'] for v in speakers.values()))
+    speaker_parts = [f'{name}（发言 {info["count"]} 句，占 {info["chars"] / total_chars * 100:.0f}%）'
+                     for name, info in sorted(speakers.items())]
+    attendee_text = (f'共 {len(speakers)} 人：' + '；'.join(speaker_parts)) if speaker_parts \
+        else '（待补充）'
 
     lines = [f'# {title} 会议纪要', '']
-    lines.append(f'- **会议名称**：{title}')
-    if created_text:
-        lines.append(f'- **会议时间**：{created_text}')
-    lines.append(f'- **会议时长**：{format_duration(duration)}')
-    lines.append(f'- **参会人员**：共 {len(speakers) or 1} 人'
-                 + (f'（{"；".join(speaker_parts)}）' if speaker_parts else ''))
-    if topics:
-        lines.append(f'- **会议主题**：{"、".join(topics[:5])}')
-    lines.append('- **记录方式**：会议室智能合规分析系统自动转写与整理'
-                 '（说话人按声纹聚类编号，人员姓名需人工核对）')
+
+    # ---- 会议组织情况（公文里各自单独成段）----
+    lines.append(f'会议名称：{title}')
+    lines.append(f'时　　间：{created_text}（时长 {format_duration(duration)}）')
+    lines.append(f'地　　点：{getattr(meeting, "location", None) or _MOMENT_PLACEHOLDER}')
+    lines.append(f'主 持 人：{getattr(meeting, "host", None) or _MOMENT_PLACEHOLDER}')
+    lines.append(f'出席人员：{attendee_text}')
+    lines.append('列席人员：—')
+    lines.append('缺席人员：—')
+    lines.append(f'记 录 人：{getattr(meeting, "recorder", None) or _RECORDER_FALLBACK}')
+    lines.append(f'会议议题：{topic_text}')
+    lines.append('')
+    lines.append('> 说明：参会人员为系统按声纹聚类自动编号，姓名与职务请人工核对后补充；'
+                 '「地点/主持人」可在页面「编辑会议信息」中填写，重新生成文档即会带上。')
     lines.append('')
 
     lines.append('## 一、会议概况')
     lines.append((getattr(meeting, 'summary', '') or '（暂无摘要）').strip())
+    if keywords:
+        lines.append('')
+        lines.append(f'本次会议涉及的关键词：{"、".join(keywords[:12])}。')
     lines.append('')
 
-    lines.append('## 二、主要讨论内容')
+    # ---- 会议听取了下列发言（发言提要法：按发言人合并连续发言）----
+    lines.append('## 二、会议听取了下列发言')
     points = _discussion_points(transcriptions)
     if points:
+        blocks = []
         for item in points:
-            lines.append(f'- **[{item["time"]}] {item["speaker"]}**：{item["text"]}')
+            if blocks and blocks[-1]['speaker'] == item['speaker']:
+                blocks[-1]['items'].append(item)
+            else:
+                blocks.append({'speaker': item['speaker'], 'items': [item]})
+        for index, block in enumerate(blocks, 1):
+            # 序号从「（一）」开始：_CN_NUMBERS 下标从 0 起
+            order = _CN_NUMBERS[index - 1] if index <= len(_CN_NUMBERS) else str(index)
+            head = f'（{order}）{block["speaker"]}'
+            if len(block['items']) == 1:
+                item = block['items'][0]
+                lines.append(f'{head}：{item["text"]}')
+            else:
+                lines.append(f'{head}：')
+                for item in block['items']:
+                    lines.append(f'- [{item["time"]}] {item["text"]}')
     else:
         lines.append('（本次会议没有可用的转写内容）')
     lines.append('')
 
-    lines.append('## 三、决议结论')
+    lines.append('## 三、会议决定')
     if decisions:
-        lines.extend(f'{index}. {item}' for index, item in enumerate(decisions, 1))
+        for index, item in enumerate(decisions, 1):
+            lines.append(f'{index}. {item}')
     else:
-        lines.append('（本次会议未形成明确的决议结论）')
+        lines.append('本次会议未形成明确的决议事项。')
     lines.append('')
 
-    lines.append('## 四、待办事项')
+    lines.append('## 四、会议要求')
     if actions:
-        lines.extend(f'{index}. {item}' for index, item in enumerate(actions, 1))
+        lines.append('会议要求，抓紧落实以下事项：')
+        for index, item in enumerate(actions, 1):
+            lines.append(f'{index}. {item}')
     else:
-        lines.append('（本次会议未提取到明确的待办事项）')
+        lines.append('本次会议未提出明确的落实事项。')
     lines.append('')
 
     lines.append('## 五、合规与风险提示')
     if compliance:
-        lines.append(f'- 合规评分：{float(compliance.get("total_score", 0)):.1f} 分'
-                     f'{("（" + compliance.get("score_level", "") + "）") if compliance.get("score_level") else ""}')
+        lines.append(f'经与知识库比对，本次会议合规得分 '
+                     f'**{float(compliance.get("total_score", 0)):.1f} 分**'
+                     f'{("（" + compliance.get("score_level", "") + "）") if compliance.get("score_level") else ""}。')
         components = compliance.get('components') or compliance.get('detailed_scores') or {}
         if components:
             detail = '、'.join(f'{key} {float(value):.1f}' for key, value in components.items())
@@ -313,7 +380,7 @@ def build_minutes_document(meeting, transcriptions, compliance=None):
         risks = compliance.get('risk_keywords') or []
         markers = compliance.get('risk_time_markers') or []
         if risks:
-            lines.append('- 风险内容：')
+            lines.append('- 会议中出现的风险表述：')
             if markers:
                 for marker in markers[:10]:
                     if isinstance(marker, dict):
@@ -324,32 +391,61 @@ def build_minutes_document(meeting, transcriptions, compliance=None):
             else:
                 lines.append(f'  - {"、".join(str(r) for r in risks[:10])}')
         else:
-            lines.append('- 风险内容：未发现风险表述')
+            lines.append('- 未发现风险表述。')
         missing = compliance.get('missing_points') or []
         if missing:
-            lines.append(f'- 遗漏要点：{"、".join(str(m) for m in missing[:10])}')
+            lines.append(f'- 未覆盖的必传要点：{"、".join(str(m) for m in missing[:10])}')
         suggestions = compliance.get('suggestions') or []
         if suggestions:
             lines.append('- 改进建议：')
             lines.extend(f'  - {str(s)}' for s in suggestions[:5])
     else:
-        lines.append('（本次会议未执行合规比对）')
+        lines.append('本次会议未执行合规比对。')
     lines.append('')
 
-    lines.append('## 六、附：转写全文')
-    if points:
-        for item in points:
-            lines.append(f'[{item["time"]}] {item["speaker"]}：{item["text"]}')
-    else:
-        lines.append('（无）')
-    lines.append('')
-    if keywords:
-        lines.append(f'> 关键词：{"、".join(keywords[:15])}')
-        lines.append('')
-
+    # ---- 落款 ----
     lines.append('---')
-    lines.append(f'*本纪要由会议室智能合规分析系统自动生成于 {datetime.now().strftime("%Y-%m-%d %H:%M")}，'
-                 f'说话人编号（SPEAKER_00…）为系统聚类结果，请人工核对具体人员与结论。*')
+    lines.append('')
+    lines.append(f'记录整理：{_RECORDER_FALLBACK}')
+    lines.append(f'成文日期：{stamp_date}')
+    lines.append('')
+    lines.append('> 本纪要由会议室智能合规分析系统依据录音自动整理生成，'
+                 '议定事项与人员姓名请以会议实际表决结果为准；逐字发言见同目录《会议记录全文》。')
+    return '\n'.join(lines) + '\n'
+
+
+def build_transcript_document(meeting, transcriptions):
+    """会议记录全文：按说话人与时间排列的逐字记录（纪要的附件）。"""
+    title = getattr(meeting, 'title', '') or '未命名会议'
+    created = getattr(meeting, 'date', None) or getattr(meeting, 'created_at', None)
+    created_text = (created.strftime('%Y年%m月%d日 %H时%M分')
+                    if isinstance(created, datetime) else _MOMENT_PLACEHOLDER)
+    duration = getattr(meeting, 'duration', 0) or 0
+
+    speakers = sorted({(seg.get('speaker') or 'SPEAKER_00') for seg in transcriptions or []})
+    char_count = sum(len(seg.get('text') or '') for seg in transcriptions or [])
+
+    lines = [f'# {title} 会议记录（全文）', '']
+    lines.append(f'会议名称：{title}')
+    lines.append(f'时　　间：{created_text}（时长 {format_duration(duration)}）')
+    lines.append(f'出席人员：共 {len(speakers) or 1} 人（{"、".join(speakers) or "SPEAKER_00"}）')
+    lines.append('记录方式：FunASR paraformer-large 自动转写 + 标点恢复；'
+                 '说话人由声纹聚类自动编号')
+    lines.append(f'记录规模：{len(transcriptions or [])} 句，共 {char_count} 字')
+    lines.append('')
+    lines.append('---')
+    lines.append('')
+    for seg in transcriptions or []:
+        text = (seg.get('text') or '').strip()
+        if not text:
+            continue
+        lines.append(f'[{format_clock(seg.get("start_time"))}] '
+                     f'{seg.get("speaker") or "SPEAKER_00"}：{text}')
+    if not transcriptions:
+        lines.append('（无转写内容）')
+    lines.append('')
+    lines.append('---')
+    lines.append(f'*全文由系统自动转写，未经人工校对；纪要见同目录《会议纪要》。*')
     return '\n'.join(lines) + '\n'
 
 
@@ -358,7 +454,7 @@ def build_minutes_document(meeting, transcriptions, compliance=None):
 
 def write_documents(meeting, transcriptions=None, compliance=None, root=None):
     """
-    为一场会议写出两份文件，返回 {directory, minutes, summary}。
+    为一场会议写出三份文件，返回 {directory, minutes, summary, transcript}。
 
     meeting 可以是数据库模型对象，也可以是带同名属性的普通对象；
     transcriptions 支持 [{'speaker','text','start_time','end_time'}, ...]。
@@ -370,16 +466,31 @@ def write_documents(meeting, transcriptions=None, compliance=None, root=None):
 
     minutes_path = os.path.join(directory, MINUTES_NAME)
     summary_path = os.path.join(directory, SUMMARY_NAME)
+    transcript_path = os.path.join(directory, TRANSCRIPT_NAME)
     _write(minutes_path, build_minutes_document(meeting, transcriptions, compliance))
     _write(summary_path, build_summary_document(meeting, transcriptions, compliance))
-    return {'directory': directory, 'minutes': minutes_path, 'summary': summary_path}
+    _write(transcript_path, build_transcript_document(meeting, transcriptions))
+    return {'directory': directory, 'minutes': minutes_path, 'summary': summary_path,
+            'transcript': transcript_path}
 
 
 def describe_documents(meeting, root=None):
-    """返回该会议两份文档的现状（不生成），供接口展示。"""
+    """返回该会议各文档的现状（不生成），供接口与前端展示。"""
     root = root or DEFAULT_ROOT
     created = getattr(meeting, 'date', None) or getattr(meeting, 'created_at', None)
     directory = meeting_directory(root, created, getattr(meeting, 'title', ''), getattr(meeting, 'id', 0))
+    files = []
+    for kind, name in DOCUMENT_KINDS:
+        path = os.path.join(directory, name)
+        exists = os.path.exists(path)
+        files.append({
+            'kind': kind,
+            'name': name,
+            'path': path,
+            'exists': exists,
+            'size': os.path.getsize(path) if exists else 0,
+        })
+    return {'directory': directory, 'files': files}
     files = []
     for kind, name in (('minutes', MINUTES_NAME), ('summary', SUMMARY_NAME)):
         path = os.path.join(directory, name)

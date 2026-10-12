@@ -18,8 +18,12 @@ _MEETING_COLUMNS = [
     ('action_items', 'TEXT'),
     ('decisions', 'TEXT'),
     ('audio_quality', 'TEXT'),
-    # 会议文档（会议纪要 / 会议记录概要）落盘目录
+    # 会议文档（会议纪要 / 会议记录概要 / 会议记录全文）落盘目录
     ('documents_dir', 'TEXT'),
+    # 会议纪要的公文要素
+    ('location', 'TEXT'),
+    ('host', 'TEXT'),
+    ('recorder', 'TEXT'),
 ]
 
 

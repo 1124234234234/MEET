@@ -1,5 +1,6 @@
 import os
 import json
+import subprocess
 import time
 import uuid
 import threading
@@ -587,8 +588,41 @@ def update_meeting(meeting_id):
         meeting.summary = data['summary']
     if 'total_score' in data:
         meeting.total_score = data['total_score']
+    # 会议纪要的公文要素（地点/主持人/记录人）：填好后重新生成文档即会带上
+    for field in ('location', 'host', 'recorder'):
+        if field in data:
+            setattr(meeting, field, (data.get(field) or '').strip() or None)
 
     db.session.commit()
+
+    # 纪要里包含这些信息，改了就要刷新文档（文档生成很轻，几毫秒）
+    if any(field in data for field in ('location', 'host', 'recorder', 'title', 'summary')):
+        try:
+            from modules import minutes_writer
+
+            segments = [t.to_dict() for t in
+                        Transcription.query.filter_by(meeting_id=meeting_id)
+                        .order_by(Transcription.start_time).all()]
+            if segments or (meeting.summary or '').strip():
+                report = ComplianceReport.query.filter_by(meeting_id=meeting_id).first()
+                compliance = None
+                if report:
+                    raw = report.to_dict()
+                    compliance = {
+                        'total_score': raw.get('total_score', 0),
+                        'score_level': raw.get('score_level', ''),
+                        'components': raw.get('detailed_scores') or {},
+                        'missing_points': raw.get('missing_points') or [],
+                        'risk_keywords': raw.get('risk_keywords') or [],
+                        'risk_time_markers': raw.get('risk_time_markers') or [],
+                        'suggestions': raw.get('suggestions') or [],
+                    }
+                stored = minutes_writer.write_documents(meeting, segments, compliance=compliance)
+                meeting.documents_dir = stored['directory']
+                db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            print(f'[文档] 更新会议信息后刷新文档失败: {exc}')
 
     return jsonify({'code': 200, 'message': '更新成功', 'data': meeting.to_dict()})
 
@@ -1081,14 +1115,14 @@ def regenerate_meeting_documents(meeting_id):
 
 @app.route('/api/meetings/<int:meeting_id>/documents/<kind>')
 def download_meeting_document(meeting_id, kind):
-    """下载指定文档（kind: minutes=会议纪要 / summary=会议记录概要）。"""
+    """下载指定文档（kind: minutes=会议纪要 / summary=会议记录概要 / transcript=记录全文）。"""
     from modules import minutes_writer
 
     meeting = Meeting.query.get_or_404(meeting_id)
-    name = minutes_writer.MINUTES_NAME if kind == 'minutes' else (
-        minutes_writer.SUMMARY_NAME if kind == 'summary' else None)
+    name = dict(minutes_writer.DOCUMENT_KINDS).get(kind)
     if not name:
-        return jsonify({'code': 400, 'message': 'kind 只能是 minutes 或 summary'}), 400
+        return jsonify({'code': 400,
+                        'message': 'kind 只能是 minutes / summary / transcript'}), 400
 
     result = _meeting_documents(meeting_id)
     if result is None:
@@ -1104,6 +1138,34 @@ def download_meeting_document(meeting_id, kind):
     download_name = f'{meeting.title}_{name}'
     return send_file(path, as_attachment=True, download_name=download_name,
                      mimetype='text/markdown')
+
+
+@app.route('/api/meetings/<int:meeting_id>/documents/reveal', methods=['POST'])
+def reveal_meeting_documents(meeting_id):
+    """
+    在文件资源管理器里打开该会议的文档目录（本机使用）。
+
+    返回目录路径；Windows 上顺带打开资源管理器窗口，其它系统只返回路径。
+    """
+    from modules import minutes_writer
+
+    meeting = Meeting.query.get_or_404(meeting_id)
+    result = _meeting_documents(meeting_id)
+    if result is None:
+        return jsonify({'code': 404, 'message': '会议不存在'}), 404
+    if result.get('code') != 200:
+        return jsonify(result), result.get('code', 500)
+
+    directory = result['data']['directory']
+    opened = False
+    if os.name == 'nt' and os.path.isdir(directory):
+        try:
+            subprocess.Popen(['explorer', os.path.normpath(directory)])
+            opened = True
+        except Exception as exc:
+            print(f'[文档] 打开目录失败: {exc}')
+    return jsonify({'code': 200, 'message': '已打开所在文件夹' if opened else '目录路径已返回',
+                    'data': {'directory': directory, 'opened': opened}})
 
 
 @app.route('/api/documents')
@@ -1165,7 +1227,8 @@ def list_meeting_documents():
     months = [{'month': month, 'meetings': items}
               for month, items in sorted(grouped.items(), reverse=True)]
     total = sum(len(item['meetings']) for item in months)
-    return jsonify({'code': 200, 'data': {'months': months, 'total': total}})
+    return jsonify({'code': 200, 'data': {'months': months, 'total': total,
+                                          'root': minutes_writer.DEFAULT_ROOT}})
 
 @app.route('/api/reports/compliance-trend')
 def get_compliance_trend_report():

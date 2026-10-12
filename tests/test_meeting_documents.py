@@ -52,6 +52,9 @@ class FakeMeeting:
         self.audio_path = None
         self.status = 'finished'
         self.documents_dir = None
+        self.location = kwargs.get('location')
+        self.host = kwargs.get('host')
+        self.recorder = kwargs.get('recorder')
 
 
 SEGMENTS = [
@@ -74,13 +77,13 @@ COMPLIANCE = {
 
 
 def test_basic_generation():
-    """两份文件生成、目录结构、章节完整性。"""
-    print('\n[1] 基本生成与目录结构')
+    """三份文件生成、目录结构、公文格式章节完整性。"""
+    print('\n[1] 基本生成与目录结构（会议纪要按公文格式）')
     from modules import minutes_writer
 
     root = tempfile.mkdtemp(prefix='records_test_')
     try:
-        meeting = FakeMeeting()
+        meeting = FakeMeeting(location='三楼会议室', host='张三', recorder='李四')
         stored = minutes_writer.write_documents(meeting, SEGMENTS, compliance=COMPLIANCE, root=root)
 
         relative = os.path.relpath(stored['directory'], root)
@@ -90,19 +93,46 @@ def test_basic_generation():
 
         minutes = open(stored['minutes'], encoding='utf-8-sig').read()
         summary = open(stored['summary'], encoding='utf-8-sig').read()
+        transcript = open(stored['transcript'], encoding='utf-8-sig').read()
 
         record('会议纪要.md 已生成', os.path.exists(stored['minutes']))
         record('会议记录概要.md 已生成', os.path.exists(stored['summary']))
+        record('会议记录全文.md 已生成', os.path.exists(stored['transcript']))
 
-        required = ['# 合规培训会议 会议纪要', '**会议名称**', '**会议时间**', '**会议时长**',
-                    '**参会人员**', '## 一、会议概况', '## 二、主要讨论内容', '## 三、决议结论',
-                    '## 四、待办事项', '## 五、合规与风险提示', '## 六、附：转写全文']
+        # 公文格式：标题 + 会议组织情况 + 分条正文 + 落款
+        required = [
+            '# 合规培训会议 会议纪要',
+            '会议名称：合规培训会议',
+            '时　　间：2026年10月12日 15时30分',
+            '地　　点：三楼会议室',
+            '主 持 人：张三',
+            '出席人员：共 2 人',
+            '列席人员：—',
+            '缺席人员：—',
+            '记 录 人：李四',
+            '会议议题：',
+            '## 一、会议概况',
+            '## 二、会议听取了下列发言',
+            '## 三、会议决定',
+            '## 四、会议要求',
+            '## 五、合规与风险提示',
+            '记录整理：',
+            '成文日期：2026年10月12日',
+        ]
         missing = [item for item in required if item not in minutes]
-        record('纪要章节齐全', not missing, f'缺少 {missing}' if missing else '11 项齐全')
-        record('纪要含说话人标注的讨论内容', '[00:00] SPEAKER_00' in minutes and 'SPEAKER_01' in minutes)
-        record('纪要含决议与待办', '加强销售过程录音录像管理' in minutes and '下周组织全员合规培训' in minutes)
-        record('纪要含合规评分与遗漏要点', '62.6' in minutes and '投资者风险测评' in minutes)
-        record('纪要含风险时间点', '保本保收益' in minutes and '[00:05]' in minutes)
+        record('纪要符合公文格式（标题/组织情况/正文分条/落款）', not missing,
+               f'缺少 {missing}' if missing else f'{len(required)} 项齐全')
+
+        record('纪要不含逐字全文（全文另存）',
+               '[00:00] SPEAKER_00：' not in minutes)
+        record('纪要按发言人是分条整理发言要点',
+               '（一）SPEAKER_00' in minutes and '（二）SPEAKER_01' in minutes)
+        record('纪要含决议（会议决定）与待办（会议要求）',
+               '加强销售过程录音录像管理' in minutes and '下周组织全员合规培训' in minutes)
+        record('纪要含合规评分、遗漏要点与风险时间点',
+               '62.6' in minutes and '投资者风险测评' in minutes
+               and '保本保收益' in minutes and '[00:05]' in minutes)
+        record('落款日期正确', '成文日期：2026年10月12日' in minutes)
 
         summary_required = ['# 合规培训会议 · 会议记录概要', '| 项目 | 内容 |', '| 会议时长 |',
                             '| 参会人员 |', '## 一、内容摘要', '## 二、待办事项', '## 三、决议结论']
@@ -111,8 +141,32 @@ def test_basic_generation():
         record('概要含参会人数与句数', '2 人' in summary and '3 句' in summary)
         record('概要含合规与建议', '62.6' in summary and '补充风险等级说明' in summary)
 
+        transcript_required = ['# 合规培训会议 会议记录（全文）', '[00:00] SPEAKER_00：',
+                               'SPEAKER_01：', '记录方式：FunASR']
+        missing = [item for item in transcript_required if item not in transcript]
+        record('全文转写含时间戳与说话人', not missing, f'缺少 {missing}' if missing else '4 项齐全')
+        record('全文含全部三句发言', transcript.count('SPEAKER_') >= 3)
+
         with open(stored['minutes'], 'rb') as handle:
             record('文件为 UTF-8 with BOM', handle.read(3) == b'\xef\xbb\xbf')
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_missing_public_fields():
+    """没有填写地点/主持人/记录人时，纪要仍合规（显示「（待补充）」与系统署名）。"""
+    print('\n[1b] 公文要素缺失时的兜底')
+    from modules import minutes_writer
+
+    root = tempfile.mkdtemp(prefix='records_test_')
+    try:
+        meeting = FakeMeeting()
+        stored = minutes_writer.write_documents(meeting, SEGMENTS, root=root)
+        minutes = open(stored['minutes'], encoding='utf-8-sig').read()
+        record('地点未填写时显示（待补充）', '地　　点：（待补充）' in minutes)
+        record('主持人未填写时显示（待补充）', '主 持 人：（待补充）' in minutes)
+        record('记录人默认由系统署名',
+               '记 录 人：会议室智能合规分析系统' in minutes)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -160,6 +214,9 @@ def test_describe_and_regenerate():
         described = minutes_writer.describe_documents(meeting, root=root)
         record('未生成时 exists=False', all(not item['exists'] for item in described['files']),
                str([item['kind'] for item in described['files']]))
+        record('三类文档都在描述里（minutes/summary/transcript）',
+               {item['kind'] for item in described['files']}
+               == {'minutes', 'summary', 'transcript'})
 
         minutes_writer.write_documents(meeting, SEGMENTS, root=root)
         described = minutes_writer.describe_documents(meeting, root=root)
@@ -168,15 +225,17 @@ def test_describe_and_regenerate():
                f'{described["files"][0]["size"]} 字节')
 
         meeting.summary = '更新后的摘要内容：会议达成了合规培训安排。'
+        meeting.location = '第一会议室'
         minutes_writer.write_documents(meeting, SEGMENTS, root=root)
         content = open(described['files'][0]['path'], encoding='utf-8-sig').read()
-        record('重新生成会覆盖为最新分析结果', '更新后的摘要内容' in content)
+        record('重新生成会覆盖为最新分析结果',
+               '更新后的摘要内容' in content and '地　　点：第一会议室' in content)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
 
 def test_api_endpoints():
-    """接口：会议文档查看/下载/重新生成 + 按月份浏览。"""
+    """接口：会议文档查看/下载/重新生成 + 按月份浏览 + 打开目录（只验证路由存在）。"""
     print('\n[4] 接口（Flask 测试客户端）')
     from app import app
     from models import Meeting, Transcription
@@ -194,9 +253,10 @@ def test_api_endpoints():
     payload = response.get_json() or {}
     data = payload.get('data') or {}
     record(f'GET /api/meetings/{meeting_id}/documents -> {response.status_code}',
-           response.status_code == 200 and len(data.get('files', [])) == 2,
+           response.status_code == 200 and len(data.get('files', [])) == 3,
            (data.get('directory') or '')[-40:])
-    record('返回两份文件内容', set((data.get('contents') or {}).keys()) == {'minutes', 'summary'},
+    record('返回三份文件内容',
+           set((data.get('contents') or {}).keys()) == {'minutes', 'summary', 'transcript'},
            str(list((data.get('contents') or {}).keys())))
     record('目录落在 records/ 下', 'records' in (data.get('directory') or ''))
 
@@ -205,19 +265,81 @@ def test_api_endpoints():
            response.status_code == 200 and len(response.data) > 200,
            f'{len(response.data)} 字节')
 
+    response = client.get(f'/api/meetings/{meeting_id}/documents/transcript')
+    record(f'GET .../documents/transcript -> {response.status_code}',
+           response.status_code == 200 and len(response.data) > 100,
+           f'{len(response.data)} 字节')
+
+    response = client.get(f'/api/meetings/{meeting_id}/documents/unknown')
+    record('非法 kind -> 400', response.status_code == 400)
+
     response = client.post(f'/api/meetings/{meeting_id}/documents')
     record(f'POST .../documents（重新生成）-> {response.status_code}',
            response.status_code == 200)
 
+    # 打开目录接口会真的弹出资源管理器，测试里只验证路由注册
+    routes = {str(rule) for rule in app.url_map.iter_rules()}
+    record('打开目录接口已注册（不在测试里真的弹窗）',
+           '/api/meetings/<int:meeting_id>/documents/reveal' in routes)
+
     response = client.get('/api/documents')
     payload = response.get_json() or {}
-    months = ((payload.get('data') or {}).get('months') or [])
+    body = payload.get('data') or {}
+    months = body.get('months') or []
     record(f'GET /api/documents -> {response.status_code}，{len(months)} 个月份分组',
            response.status_code == 200 and months and all('month' in m for m in months),
            ', '.join(f'{m["month"]}({len(m["meetings"])})' for m in months[:4]))
+    record('接口返回文档根目录（前端用于展示存储位置）', bool(body.get('root')),
+           body.get('root') or '')
 
     response = client.get(f'/api/meetings/999999/documents')
     record('不存在的会议 -> 404', response.status_code == 404)
+
+
+def test_update_public_fields():
+    """编辑会议信息时填入地点/主持人，纪要会跟着刷新。"""
+    print('\n[4b] 填写公文要素后文档刷新')
+    from app import app
+    from database import db
+    from models import Meeting, Transcription
+    from modules import minutes_writer
+    from modules.meeting_store import delete_meeting_files, save_meeting
+
+    root = tempfile.mkdtemp(prefix='records_test_')
+    with app.app_context():
+        meeting_id = save_meeting(
+            title='公文要素测试会议',
+            transcriptions=[dict(seg) for seg in SEGMENTS],
+            summary='用于验证地点/主持人写入纪要。',
+            duration=30,
+            documents_root=root,
+        )
+        if not meeting_id:
+            record('公文要素用例', False, '入库失败')
+            shutil.rmtree(root, ignore_errors=True)
+            return
+
+        client = app.test_client()
+        response = client.put(f'/api/meetings/{meeting_id}', json={
+            'location': '总部 12 楼会议室',
+            'host': '王经理',
+            'recorder': '行政部',
+        })
+        record(f'PUT /api/meetings/{meeting_id} 更新公文要素 -> {response.status_code}',
+               response.status_code == 200)
+
+        meeting = Meeting.query.get(meeting_id)
+        path = os.path.join(meeting.documents_dir, minutes_writer.MINUTES_NAME)
+        content = open(path, encoding='utf-8-sig').read()
+        record('地点/主持人/记录人已写入纪要',
+               '地　　点：总部 12 楼会议室' in content and '主 持 人：王经理' in content
+               and '记 录 人：行政部' in content)
+
+        Transcription.query.filter_by(meeting_id=meeting_id).delete()
+        db.session.delete(meeting)
+        db.session.commit()
+        delete_meeting_files(type('M', (), {'audio_path': None})())
+    shutil.rmtree(root, ignore_errors=True)
 
 
 def test_save_meeting_writes_documents():
@@ -264,8 +386,9 @@ def main():
     print('=' * 68)
     print('会议文档生成测试')
     print('=' * 68)
-    for func in (test_basic_generation, test_filename_safety, test_describe_and_regenerate,
-                 test_api_endpoints, test_save_meeting_writes_documents):
+    for func in (test_basic_generation, test_missing_public_fields, test_filename_safety,
+                 test_describe_and_regenerate, test_api_endpoints, test_update_public_fields,
+                 test_save_meeting_writes_documents):
         try:
             func()
         except Exception as exc:
