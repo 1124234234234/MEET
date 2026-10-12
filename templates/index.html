@@ -77,6 +77,7 @@
         <h1>📋 会议智能分析系统</h1>
         <div class="nav">
             <button class="active" onclick="showTab('meeting')">会议分析</button>
+            <button onclick="showTab('documents')">会议文档</button>
             <button onclick="showTab('knowledge')">知识库管理</button>
             <button onclick="showTab('reports')">合规报告</button>
             <button onclick="showTab('settings')">系统设置</button>
@@ -258,6 +259,23 @@
                     </thead>
                     <tbody id="meeting-list"></tbody>
                 </table>
+            </div>
+        </div>
+
+        <div class="tab-content" id="documents">
+            <div class="card">
+                <div class="card-title">📄 会议文档（会议纪要 / 会议记录概要）</div>
+                <p style="color:#666; font-size:13px; margin-bottom:12px;">
+                    每场会议自动生成两份文件，按「日期」分月归档在项目目录
+                    <code>records/&lt;年-月&gt;/&lt;日期_标题_会议id&gt;/</code> 下：
+                    会议纪要.md（正式纪要，含讨论内容、决议、待办、合规提示与转写全文）与
+                    会议记录概要.md（一页速览）。下面按月份列出，可直接下载查看。
+                </p>
+                <div style="display:flex; gap:8px; margin-bottom:12px;">
+                    <button class="btn btn-secondary" onclick="loadMeetingDocuments()">刷新列表</button>
+                    <button class="btn btn-secondary" onclick="regenerateAllDocuments()">补生成缺失文档</button>
+                </div>
+                <div id="documents-list" style="color:#999;">加载中...</div>
             </div>
         </div>
 
@@ -485,11 +503,84 @@
             window.open(`${API_BASE}/reports/meeting-summary/${currentMeetingId}`, '_blank');
         }
 
+        // ---------------- 会议文档（会议纪要 / 会议记录概要） ----------------
+
+        function documentLink(meetingId, kind) {
+            return `${API_BASE}/meetings/${meetingId}/documents/${kind}`;
+        }
+
+        async function loadMeetingDocuments(includeMissing = true) {
+            const box = document.getElementById('documents-list');
+            if (!box) return;
+            box.innerHTML = '<span style="color:#999;">加载中...</span>';
+            try {
+                const query = includeMissing ? '' : '?include_missing=1';
+                const response = await fetch(`${API_BASE}/documents${query}`);
+                const payload = await response.json();
+                const data = payload.data || {};
+                const months = data.months || [];
+                if (!months.length) {
+                    box.innerHTML = '<span style="color:#999;">还没有可生成的会议文档。'
+                        + '完成一次会议分析后会自动生成。</span>';
+                    return;
+                }
+                let html = `<p style="color:#666; font-size:13px;">共 ${data.total} 场会议</p>`;
+                months.forEach((month) => {
+                    html += `<div style="margin-bottom:18px;">`
+                         + `<h4 style="margin-bottom:8px; color:#1890ff;">📅 ${month.month}`
+                         + `（${month.meetings.length} 场）</h4>`;
+                    month.meetings.forEach((meeting) => {
+                        const docs = (meeting.documents || []).map((doc) => {
+                            const label = doc.kind === 'minutes' ? '会议纪要' : '会议记录概要';
+                            if (!doc.exists) {
+                                return `<span style="color:#bbb;">${label}（未生成）</span>`;
+                            }
+                            return `<a href="${documentLink(meeting.meeting_id, doc.kind)}"`
+                                + ` style="color:#1890ff;">${label}（${Math.max(1, Math.round(doc.size / 1024))} KB）</a>`;
+                        }).join(' ｜ ');
+                        html += `<div style="padding:8px 0; border-bottom:1px solid #f0f0f0;">`
+                             + `<div><strong>${meeting.title}</strong>`
+                             + `<span style="color:#999; font-size:12px; margin-left:8px;">`
+                             + `${meeting.date} · ${meeting.duration} 秒`
+                             + `${meeting.score !== null && meeting.score !== undefined ? ' · 合规 ' + meeting.score.toFixed(1) + ' 分' : ''}`
+                             + `</span></div>`
+                             + `<div style="font-size:13px; margin-top:4px;">${docs}</div>`
+                             + `<div style="color:#bbb; font-size:12px;">${meeting.directory}</div>`
+                             + `</div>`;
+                    });
+                    html += `</div>`;
+                });
+                box.innerHTML = html;
+            } catch (error) {
+                box.innerHTML = `<span style="color:#ff4d4f;">加载失败：${error.message || error}</span>`;
+            }
+        }
+
+        async function regenerateAllDocuments() {
+            await loadMeetingDocuments(true);
+            alert('已为缺失文档的会议补生成（内容取自各会议已有分析结果）。');
+        }
+
+        async function regenerateDocuments(meetingId) {
+            try {
+                const response = await fetch(`${API_BASE}/meetings/${meetingId}/documents`, {
+                    method: 'POST'
+                });
+                const payload = await response.json();
+                if (!response.ok || payload.code !== 200) {
+                    throw new Error(payload.message || '生成失败');
+                }
+                const data = payload.data || {};
+                alert('已重新生成：\n' + (data.directory || ''));
+            } catch (error) {
+                alert('重新生成失败：' + (error.message || error));
+            }
+        }
+
         function showTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.header .nav button').forEach(el => el.classList.remove('active'));
             document.getElementById(tabId).classList.add('active');
-
             // 高亮对应按钮：不依赖全局 event 对象。
             // 旧实现用 event.target，程序化调用（或某些浏览器）下 event 为 undefined，
             // 会在这一行抛错，导致后面的数据加载永远不执行——页签切过去却是空白。
@@ -501,6 +592,7 @@
             });
 
             if (tabId === 'meeting') loadMeetingList();
+            if (tabId === 'documents') loadMeetingDocuments();
             if (tabId === 'knowledge') loadKnowledgeList();
             if (tabId === 'reports') loadReports();
             if (tabId === 'settings') loadSettings();
@@ -866,37 +958,108 @@
             }
         }
 
-        function appendRealtimeText(text, compliance) {
-            const el = document.getElementById('realtime-transcription');
-            if (el.querySelector('span[style*="color:#999"]')) {
-                el.innerHTML = '';
-            }
-            let html = `<p style="margin-bottom:8px;">${text}</p>`;
+        // 实时转写的分句与合规提示都存下来：说话人标注是「边录边刷新」的，
+        // 每隔十几秒后端会用整段录音重算一次说话人，前端据此整段重绘，
+        // 所以这里不能只往 DOM 里追加。
+        let realtimeSegments = [];
+        let realtimeAlerts = [];
 
-            // 实时合规告警：会议进行中当场提示，并标注发生时间便于回溯
+        function renderRealtimeTranscript() {
+            const el = document.getElementById('realtime-transcription');
+            if (!el) {
+                return;
+            }
+            if (!realtimeSegments.length && !realtimeAlerts.length) {
+                return;
+            }
+            const items = [];
+            realtimeSegments.forEach((seg) => {
+                const speaker = seg.speaker || 'SPEAKER_00';
+                items.push({
+                    time: seg.start ?? 0,
+                    order: 1,
+                    html: `<p style="margin-bottom:8px;">`
+                        + `<span class="speaker-tag">${speaker}</span>`
+                        + `<span style="color:#999;font-size:12px;margin-right:6px;">`
+                        + `${formatTime(seg.start ?? 0)}</span>${seg.text}</p>`
+                });
+            });
+            realtimeAlerts.forEach((alert) => {
+                items.push({time: alert.time, order: 0, html: alert.html});
+            });
+            items.sort((a, b) => (a.time - b.time) || (a.order - b.order));
+            el.innerHTML = items.map(item => item.html).join('');
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function collectRealtimeAlerts(compliance) {
             (compliance || []).forEach((alert) => {
                 const items = alert.risk_items || [];
-                const time = formatTime(
-                    (items[0] && items[0].start_time) ?? alert.start_time ?? 0);
+                const time = (items[0] && items[0].start_time) ?? alert.start_time ?? 0;
                 if (alert.has_risk) {
                     const names = (alert.risk_keywords && alert.risk_keywords.length
                         ? alert.risk_keywords
                         : items.map(r => r.keyword)).join('、');
-                    html += `<p style="margin:0 0 8px 0;padding:6px 8px;border-radius:4px;`
-                         + `background:#fff2f0;border-left:3px solid #ff4d4f;color:#cf1322;font-size:13px;">`
-                         + `⚠ 风险提示（${time}）：${names}</p>`;
+                    realtimeAlerts.push({
+                        time: time,
+                        key: `risk-${time}-${names}`,
+                        html: `<p style="margin:0 0 8px 0;padding:6px 8px;border-radius:4px;`
+                            + `background:#fff2f0;border-left:3px solid #ff4d4f;color:#cf1322;font-size:13px;">`
+                            + `⚠ 风险提示（${formatTime(time)}）：${names}</p>`
+                    });
                 }
                 if (alert.covered_points && alert.covered_points.length > 0) {
                     const names = alert.covered_points.map(p => p.point).join('、');
-                    const pointTime = formatTime(alert.covered_points[0].start_time ?? 0);
-                    html += `<p style="margin:0 0 8px 0;padding:6px 8px;border-radius:4px;`
-                         + `background:#f6ffed;border-left:3px solid #52c41a;color:#237804;font-size:13px;">`
-                         + `✓ 已覆盖要点（${pointTime}）：${names}</p>`;
+                    const pointTime = alert.covered_points[0].start_time ?? 0;
+                    realtimeAlerts.push({
+                        time: pointTime,
+                        key: `point-${pointTime}-${names}`,
+                        html: `<p style="margin:0 0 8px 0;padding:6px 8px;border-radius:4px;`
+                            + `background:#f6ffed;border-left:3px solid #52c41a;color:#237804;font-size:13px;">`
+                            + `✓ 已覆盖要点（${formatTime(pointTime)}）：${names}</p>`
+                    });
                 }
             });
+            // 同一段文本只会回传一次合规结果，这里再按 key 去重，避免重复插入
+            const seen = new Set();
+            realtimeAlerts = realtimeAlerts.filter((alert) => {
+                if (seen.has(alert.key)) {
+                    return false;
+                }
+                seen.add(alert.key);
+                return true;
+            });
+        }
 
-            el.innerHTML += html;
-            el.scrollTop = el.scrollHeight;
+        function appendRealtimeText(data) {
+            const payload = data || {};
+            if (Array.isArray(payload.history) && payload.history.length) {
+                // 后端刷新了说话人标注：用整段历史覆盖本地分句表
+                realtimeSegments = payload.history.map((seg) => ({
+                    text: seg.text,
+                    speaker: seg.speaker,
+                    start: seg.start,
+                    end: seg.end,
+                }));
+            } else if (Array.isArray(payload.segments) && payload.segments.length) {
+                payload.segments.forEach((seg) => {
+                    realtimeSegments.push({
+                        text: seg.text,
+                        speaker: seg.speaker,
+                        start: seg.start,
+                        end: seg.end,
+                    });
+                });
+            } else if (payload.text) {
+                realtimeSegments.push({text: payload.text, speaker: 'SPEAKER_00'});
+            }
+            collectRealtimeAlerts(payload.compliance);
+            renderRealtimeTranscript();
+        }
+
+        function resetRealtimeTranscript() {
+            realtimeSegments = [];
+            realtimeAlerts = [];
         }
 
         function pcmToBase64(inputData) {
@@ -934,8 +1097,8 @@
                     }
                     const payload = await response.json();
                     const data = payload.data;
-                    if (data && data.text) {
-                        appendRealtimeText(data.text, data.compliance);
+                    if (data && (data.text || data.history)) {
+                        appendRealtimeText(data);
                     }
                 }
             } catch (error) {
@@ -982,6 +1145,7 @@
                     throw new Error(startPayload.message || '会话创建失败');
                 }
                 realtimeSessionId = startPayload.data.session_id;
+                resetRealtimeTranscript();
                 console.log('实时转写会话:', realtimeSessionId, '采样率', actualRate);
 
                 const source = audioContext.createMediaStreamSource(mediaStream);
@@ -1265,6 +1429,22 @@
             }
 
             document.getElementById('modal-body').innerHTML = `
+                <div style="margin-bottom:20px; padding:12px; background:#fffbe6; border-radius:8px; border-left:4px solid #faad14;">
+                    <h4 style="margin-bottom:8px;">📄 会议文档</h4>
+                    <p style="font-size:13px; color:#666; margin-bottom:8px; line-height:1.7;">
+                        系统已把这场会议写成两份文件，按日期归档到
+                        <code>records/&lt;年-月&gt;/&lt;日期_标题_id&gt;/</code>：
+                        会议纪要（含讨论内容、决议、待办、合规提示与转写全文）和会议记录概要（一页速览）。
+                    </p>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <a class="btn btn-primary" target="_blank"
+                           href="${documentLink(data.id, 'minutes')}">📝 下载会议纪要</a>
+                        <a class="btn btn-secondary" target="_blank"
+                           href="${documentLink(data.id, 'summary')}">📋 下载会议记录概要</a>
+                        <button class="btn btn-secondary"
+                                onclick="regenerateDocuments(${data.id})">重新生成</button>
+                    </div>
+                </div>
                 <div style="margin-bottom:20px;">
                     <h4>基本信息</h4>
                     <p>日期: ${new Date(data.date).toLocaleString()}</p>

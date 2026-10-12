@@ -8,11 +8,17 @@
   2. 实时链路准确率评测（tests/test_realtime_accuracy.py）
      - 按浏览器实际的 500ms 分块回放音频走实时转写，算 CER
      - 纯静音不产生幻觉文本、分句时间戳与音频对齐
-  3. 实时转写 HTTP 接口端到端测试（tests/test_realtime_http.py）
+  3. 说话人识别回归（tests/test_speaker_recognition.py）
+     - 人数判定（3 人会议 / 2 人对话 / 真实单侧通话）、混淆率、逐句归属
+     - 少言说话人不被并掉、碎片簇判据、实时增量标注
+  4. 会议文档生成（tests/test_meeting_documents.py）
+     - 会议纪要与会议记录概要两份文件、按日期分月归档、文件名安全
+     - 文档接口（查看/下载/重新生成/按月份浏览）、入库时自动生成
+  5. 实时转写 HTTP 接口端到端测试（tests/test_realtime_http.py）
      - 内置页面使用的 /api/realtime/* 全流程、48kHz 重采样、空会话、合规摘要
-  4. 实时转写 Socket.IO 兼容测试（tests/test_realtime.py）
+  6. 实时转写 Socket.IO 兼容测试（tests/test_realtime.py）
      - 事件接线、时间戳推进、时长计算、分析与入库
-  5. 历史模块单元测试（音频预处理 / 文本分析 / 合规检查）
+  7. 历史模块单元测试（音频预处理 / 文本分析 / 合规检查）
 
 内存说明：
     每个测试进程都要自己加载一套模型（FunASR 声纹识别 + 标点 + 句向量，
@@ -199,6 +205,7 @@ def main():
         env['ENABLE_TEXT_MODELS'] = 'true'
 
     plans = [('test_voice_pipeline.py', 2400), ('test_realtime_accuracy.py', 1800),
+             ('test_speaker_recognition.py', 1800), ('test_meeting_documents.py', 900),
              ('test_realtime_http.py', 1800), ('test_realtime.py', 1800)]
     if not quick:
         plans += [('test_audio_preprocessor.py', 900), ('test_text_analyzer.py', 900),

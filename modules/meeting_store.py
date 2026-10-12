@@ -18,6 +18,8 @@ _MEETING_COLUMNS = [
     ('action_items', 'TEXT'),
     ('decisions', 'TEXT'),
     ('audio_quality', 'TEXT'),
+    # 会议文档（会议纪要 / 会议记录概要）落盘目录
+    ('documents_dir', 'TEXT'),
 ]
 
 
@@ -72,14 +74,18 @@ def save_meeting(
     duration=0,
     language='zh',
     status='finished',
+    documents_root=None,
 ):
     """
-    保存一场会议（会议主体 + 转写分句 + 合规报告）。
+    保存一场会议（会议主体 + 转写分句 + 合规报告 + 会议文档）。
 
     参数：
         transcriptions: [{'speaker','text','start_time','end_time','confidence'}, ...]
         compliance:    合规结果字典（含 total_score/score_level/components 等）
-        audio_quality: 音频质量报告字典（降噪量 / 处理前后信噪比）
+        audio_quality: 音频质量报告字典（降噪量 / 处理前信噪比）
+
+    同时会写出两份会议文档（会议纪要 / 会议记录概要），按日期分类存到
+    records/ 下，并把目录记进 meeting.documents_dir；文档写失败不影响入库。
 
     返回新建会议的 id；失败返回 None。
     """
@@ -130,6 +136,22 @@ def save_meeting(
             meeting.score_level = compliance.get('score_level', '')
             db.session.commit()
 
+        # 会议文档（会议纪要 / 会议记录概要）：失败只记日志，不影响会议入库
+        try:
+            from modules import minutes_writer
+
+            stored = minutes_writer.write_documents(
+                meeting,
+                [segment.to_dict() for segment in meeting.transcriptions],
+                compliance=_compliance_payload(compliance),
+                root=documents_root,
+            )
+            meeting.documents_dir = stored['directory']
+            db.session.commit()
+        except Exception as exc:
+            print(f'[文档] 生成会议文档失败（不影响入库）: {exc}')
+            db.session.rollback()
+
         return meeting.id
 
     except Exception as exc:
@@ -138,6 +160,21 @@ def save_meeting(
         import traceback
         traceback.print_exc()
         return None
+
+
+def _compliance_payload(compliance):
+    """把分析结果里的合规字典转成文档需要的形状（键名统一）。"""
+    if not compliance:
+        return None
+    return {
+        'total_score': compliance.get('total_score', 0),
+        'score_level': compliance.get('score_level', ''),
+        'components': compliance.get('components') or compliance.get('detailed_scores') or {},
+        'missing_points': compliance.get('missing_points') or [],
+        'risk_keywords': compliance.get('risk_keywords_found') or compliance.get('risk_keywords') or [],
+        'risk_time_markers': compliance.get('risk_time_markers') or [],
+        'suggestions': compliance.get('suggestions') or [],
+    }
 
 
 def delete_meeting_files(meeting):

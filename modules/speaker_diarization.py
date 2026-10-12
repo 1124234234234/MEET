@@ -48,6 +48,13 @@ MIN_CLUSTER_SHARE = 0.03
 # 碎片簇判据（数据见 _merge_fragment_clusters 的说明）
 FRAGMENT_MAX_WINDOWS = 2
 FRAGMENT_MAX_SECONDS = 2.5
+# 碎片簇还必须「占比很小」才会被并与最近的簇。
+# 实测（7 段真实/合成录音）：真实的说话人簇最少也有 18 个窗口、占比 23.6%；
+# 边界抖动摇出来的碎片簇是 1~2 个窗口、占比 1.1%~3.7%。
+# 只按「窗口数 ≤2 且 <2.5s」判会误伤短录音里真实的次要说话人
+# （例如 15 秒的对话里第二位只说了两句，2 个窗口就占了 10% 以上），
+# 因此再加一道占比门槛：占比 ≥ 8% 的小簇视为真说话人，保留不并。
+FRAGMENT_MAX_SHARE = 0.08
 
 
 def _mfcc_features(y, sr):
@@ -254,7 +261,13 @@ def _merge_fragment_clusters(embeddings, labels, windows):
         真实单侧通话2    1       2      2 个窗口、1.68s、1 个连续段、占比 2.0%
 
     真实说话人的簇最少也有 18 个窗口、35% 占比。因此判据取：
-        窗口数 <= 2 且 时间跨度 < 2.5s 且 只含 1 个连续段  →  视为碎片，并入最近的簇
+        窗口数 <= 2 且 时间跨度 < 2.5s 且 只含 1 个连续段 且 占比 < 8%
+        →  视为碎片，并入最近的簇
+
+    「占比 < 8%」是后加的一道门槛：只按前三条判，会把短录音里真实的次要
+    说话人也并掉（15 秒的对话里第二位只说两句，2 个窗口就占 10%+）。
+    加门槛后，7 段实测录音的行为与原判据完全一致（碎片簇占比都 ≤3.7%），
+    但短录音里的次要说话人能被保住。
 
     注意：这里没有「至少保留 N 个说话人」的下限。之前加过这个下限来防止
     把说话少的人并掉，结果反而让单说话人录音被拆成 2 人（真实通话1/2 就是这样）。
@@ -266,6 +279,7 @@ def _merge_fragment_clusters(embeddings, labels, windows):
     if len(unique) <= 1:
         return labels
 
+    total = int(np.sum(counts))
     centroids = {}
     for label in unique:
         centroid = embeddings[labels == label].mean(axis=0)
@@ -278,6 +292,9 @@ def _merge_fragment_clusters(embeddings, labels, windows):
     merged_labels = []
     for label, count in zip(unique, counts):
         if count > FRAGMENT_MAX_WINDOWS:
+            continue
+        # 占比够大就不是碎片，是说话少的人（短录音里尤其容易撞上这条）
+        if total and count / total >= FRAGMENT_MAX_SHARE:
             continue
         index = np.where(labels == label)[0]
         span_start = windows[index[0]][0]
@@ -411,22 +428,33 @@ def _pyannote_diarize(audio_path, num_speakers=None):
         return None
 
 
-def diarize(audio_path, num_speakers=None, regions=None):
+def diarize(audio_path=None, num_speakers=None, regions=None, audio=None, sr=DEFAULT_SR):
     """
     执行说话人分离。
 
     返回按时间排序的说话人时间段列表：
         [{'start': 秒, 'end': 秒, 'speaker': 'SPEAKER_00'}, ...]
-    """
-    pyannote_result = _pyannote_diarize(audio_path, num_speakers)
-    if pyannote_result:
-        print('[说话人分离] 使用 pyannote 声纹模型')
-        return pyannote_result
 
+    audio_path 传文件路径；实时转写这种「音频在内存里」的调用方可以直接传
+    audio（numpy 数组）+ sr，省掉一次落盘再读盘。
+    """
     import time
 
     t0 = time.time()
-    y = load_audio(audio_path, sr=DEFAULT_SR)
+
+    if audio is not None:
+        y = np.asarray(audio, dtype=np.float32)
+        if sr != DEFAULT_SR:
+            from modules.audio_io import resample
+
+            y = resample(y, sr, DEFAULT_SR)
+    else:
+        pyannote_result = _pyannote_diarize(audio_path, num_speakers)
+        if pyannote_result:
+            print('[说话人分离] 使用 pyannote 声纹模型')
+            return pyannote_result
+        y = load_audio(audio_path, sr=DEFAULT_SR)
+
     if len(y) < DEFAULT_SR * 0.5:
         return []
 
@@ -499,18 +527,22 @@ def assign_speakers_to_segments(segments, diarization, default_speaker='SPEAKER_
     return result
 
 
-def speaker_diarization_simple(audio_path, num_speakers=None, timeout=180):
+def speaker_diarization_simple(audio_path=None, num_speakers=None, timeout=180,
+                              audio=None, sr=DEFAULT_SR):
     """
     兼容旧接口的说话人分离入口（内部改用声纹嵌入 + 凝聚聚类）。
 
     保留超时保护：分析线程超过 timeout 秒未完成时返回空结果，
     避免脏音频把整条分析流程拖死。
+
+    audio 非空时直接用内存里的音频（实时转写增量刷新用），不再读文件。
     """
     container = []
 
     def _run():
         try:
-            container.append(diarize(audio_path, num_speakers=num_speakers))
+            container.append(diarize(audio_path, num_speakers=num_speakers,
+                                     audio=audio, sr=sr))
         except Exception as exc:
             print(f'[说话人分离] 失败: {exc}')
             container.append([])

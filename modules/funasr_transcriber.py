@@ -67,6 +67,11 @@ MIN_PAUSE_SECONDS = 0.25
 TARGET_CHECK_INTERVAL_SECONDS = 1.0
 # 最短识别片段，过短不作为独立分句
 MIN_CHUNK_SECONDS = 0.4
+# 实时说话人标注的刷新间隔（秒）：间隔太短会频繁重算声纹特征，
+# 太长则用户看不到说话人区分。1 分钟音频重算一次约 0.2~0.3s，取自适应值。
+SPEAKER_REFRESH_SECONDS = 15.0
+# 录到该长度之后才开始做说话人标注（太短判不准，也没有区分价值）
+SPEAKER_MIN_SECONDS = 8.0
 
 
 def _pick_cut_seconds(regions, duration):
@@ -117,6 +122,60 @@ class FunASRRealtimeTranscriber:
         self.level_history = []
         # 上次在软目标处寻找切点时的缓冲长度
         self.last_target_check = 0.0
+        # 说话人标注（实时增量）：已刷新到的音频长度、当前刷新出的说话人分段
+        self.speaker_refresh_seconds = 0.0
+        self.speaker_segments = []
+
+    # ---------- 说话人（实时增量标注） ----------
+
+    def _refresh_speaker_labels(self, force=False):
+        """
+        对「已经录到的全部音频」重跑一次说话人分离，并刷新所有已出分句的说话人。
+
+        为什么这样做：边说边转的时候只有一小段缓冲，声纹特征太少、判不准；
+        但整段录音累积起来之后，用与停止后完全相同的离线算法（1.5s 窗口池化 +
+        余弦聚类 + 轮廓系数定人数）就能得到与最终结果一致的标注 —— 实测
+        未知说话人时不再全部显示 SPEAKER_00，用户录到一半就能看出几个人在说话。
+
+        代价：每次刷新要重算整段音频的声纹特征（1 分钟音频约 0.2~0.3s），
+        因此按 SPEAKER_REFRESH_SECONDS 间隔触发，而不是每块都算。
+        """
+        if not self.transcription_history or not self.all_audio_data:
+            return False
+        recorded = sum(len(chunk) for chunk in self.all_audio_data) / self.sr
+        if not force and recorded - self.speaker_refresh_seconds < SPEAKER_REFRESH_SECONDS:
+            return False
+        if not force and recorded < SPEAKER_MIN_SECONDS:
+            return False
+
+        self.speaker_refresh_seconds = recorded
+        try:
+            from modules import speaker_diarization
+
+            audio = np.concatenate(self.all_audio_data)
+            turns = speaker_diarization.speaker_diarization_simple(
+                audio=audio, sr=self.sr, timeout=60)
+            if not turns:
+                return False
+            self.speaker_segments = turns
+            labelled = speaker_diarization.assign_speakers_to_segments(
+                [dict(segment) for segment in self.transcription_history], turns)
+            for target, updated in zip(self.transcription_history, labelled):
+                target['speaker'] = updated.get('speaker') or target.get('speaker')
+            return True
+        except Exception as exc:
+            print(f'[实时转写] 说话人刷新失败: {exc}')
+            return False
+
+    def _history_payload(self):
+        """当前全部分句（含最新说话人标注），用于让前端整段刷新。"""
+        return [{
+            'text': segment['text'],
+            'start': segment['start_time'],
+            'end': segment['end_time'],
+            'speaker': segment.get('speaker') or 'SPEAKER_00',
+            'confidence': segment.get('confidence', 1.0),
+        } for segment in self.transcription_history]
 
     # ---------- 音频接收 ----------
 
@@ -253,6 +312,10 @@ class FunASRRealtimeTranscriber:
         for segment in segments:
             self.transcription_history.append(segment)
 
+        # 说话人标注（增量）：按间隔对已录音频重跑一次分离，刷新全部分句的说话人。
+        # 这样录制过程中就能看到谁在说，而不是一律显示 SPEAKER_00。
+        speakers_updated = self._refresh_speaker_labels()
+
         text = ''.join(segment['text'] for segment in segments)
 
         # 实时合规比对：边转写边与知识库对照，命中风险词或覆盖到必传要点
@@ -262,10 +325,13 @@ class FunASRRealtimeTranscriber:
 
         return {
             'text': text,
+            'speaker_updated': speakers_updated,
+            'history': self._history_payload(),
             'segments': [{
                 'text': segment['text'],
                 'start': segment['start_time'],
                 'end': segment['end_time'],
+                'speaker': segment.get('speaker') or 'SPEAKER_00',
                 'confidence': segment['confidence'],
             } for segment in segments],
             'compliance': compliance_alerts,
@@ -363,6 +429,9 @@ class FunASRRealtimeTranscriber:
         # 导致最后一句在会议记录里出现两遍。
         if self.buffer:
             self._process_buffer('force')
+
+        # 收尾时再刷新一次说话人：保证最终结果里的说话人与整段录音一致
+        self._refresh_speaker_labels(force=True)
 
         transcriptions = [dict(seg) for seg in self.transcription_history]
         full_text = ''.join(seg['text'] for seg in transcriptions)

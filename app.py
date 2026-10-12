@@ -4,7 +4,7 @@ import time
 import uuid
 import threading
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template, send_file, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO
 
@@ -431,6 +431,23 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
 
             meeting.status = 'finished'
             db.session.commit()
+
+            # 会议文档（会议纪要 / 会议记录概要）：这里不走 save_meeting，
+            # 需要在分析完成后显式生成，失败不影响入库结果
+            try:
+                from modules import minutes_writer
+
+                stored = minutes_writer.write_documents(
+                    meeting,
+                    [segment.to_dict() for segment in meeting.transcriptions],
+                    compliance=compliance_result,
+                )
+                meeting.documents_dir = stored['directory']
+                db.session.commit()
+                print(f'Meeting {meeting_id}: 会议文档已生成 -> {stored["directory"]}')
+            except Exception as exc:
+                db.session.rollback()
+                print(f'Meeting {meeting_id}: 生成会议文档失败（不影响入库）: {exc}')
 
         update_progress(100, '分析完成')
         print(f'Meeting {meeting_id} 分析完成，总耗时 {_time.time()-started:.1f}s')
@@ -977,6 +994,178 @@ def get_meeting_summary_report(meeting_id):
 
     html_report = generate_report_html('meeting_summary', meeting_data)
     return html_report, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+
+# ---------------------------------------------------------------- 会议文档
+# 会议纪要 / 会议记录概要两份文件：按日期分月存到 records/ 下，
+# 这里提供查看、下载、重新生成与按日期浏览的接口。
+
+def _meeting_documents(meeting_id, regenerate=False):
+    """取（必要时生成）某场会议的两份文档，返回给接口的字典。"""
+    from modules import minutes_writer
+
+    meeting = Meeting.query.get(meeting_id)
+    if not meeting:
+        return None
+
+    segments = [t.to_dict() for t in
+                Transcription.query.filter_by(meeting_id=meeting_id)
+                .order_by(Transcription.start_time).all()]
+    if not segments and not (meeting.summary or '').strip():
+        return {'code': 404, 'message': '该会议还没有转写内容，无法生成文档'}
+
+    report = ComplianceReport.query.filter_by(meeting_id=meeting_id).first()
+    compliance = None
+    if report:
+        raw = report.to_dict()
+        compliance = {
+            'total_score': raw.get('total_score', 0),
+            'score_level': raw.get('score_level', ''),
+            'components': raw.get('detailed_scores') or {},
+            'missing_points': raw.get('missing_points') or [],
+            'risk_keywords': raw.get('risk_keywords') or [],
+            'risk_time_markers': raw.get('risk_time_markers') or [],
+            'suggestions': raw.get('suggestions') or [],
+        }
+
+    described = minutes_writer.describe_documents(meeting)
+    missing = [item for item in described['files'] if not item['exists']]
+    if regenerate or missing or not meeting.documents_dir:
+        stored = minutes_writer.write_documents(meeting, segments, compliance=compliance)
+        meeting.documents_dir = stored['directory']
+        db.session.commit()
+        described = minutes_writer.describe_documents(meeting)
+
+    contents = {}
+    for item in described['files']:
+        if item['exists']:
+            try:
+                with open(item['path'], encoding='utf-8-sig') as handle:
+                    contents[item['kind']] = handle.read()
+            except OSError as exc:
+                print(f'[文档] 读取失败 {item["path"]}: {exc}')
+
+    return {
+        'code': 200,
+        'data': {
+            'meeting_id': meeting.id,
+            'title': meeting.title,
+            'directory': described['directory'],
+            'files': described['files'],
+            'contents': contents,
+        },
+    }
+
+
+@app.route('/api/meetings/<int:meeting_id>/documents', methods=['GET'])
+def get_meeting_documents(meeting_id):
+    """查看会议文档（文件不存在时自动补生成）。"""
+    result = _meeting_documents(meeting_id)
+    if result is None:
+        return jsonify({'code': 404, 'message': '会议不存在'}), 404
+    if result.get('code') != 200:
+        return jsonify(result), result.get('code', 500)
+    return jsonify(result)
+
+
+@app.route('/api/meetings/<int:meeting_id>/documents', methods=['POST'])
+def regenerate_meeting_documents(meeting_id):
+    """重新生成会议文档（纪要/概要内容会随最新分析结果刷新）。"""
+    result = _meeting_documents(meeting_id, regenerate=True)
+    if result is None:
+        return jsonify({'code': 404, 'message': '会议不存在'}), 404
+    if result.get('code') != 200:
+        return jsonify(result), result.get('code', 500)
+    return jsonify(result)
+
+
+@app.route('/api/meetings/<int:meeting_id>/documents/<kind>')
+def download_meeting_document(meeting_id, kind):
+    """下载指定文档（kind: minutes=会议纪要 / summary=会议记录概要）。"""
+    from modules import minutes_writer
+
+    meeting = Meeting.query.get_or_404(meeting_id)
+    name = minutes_writer.MINUTES_NAME if kind == 'minutes' else (
+        minutes_writer.SUMMARY_NAME if kind == 'summary' else None)
+    if not name:
+        return jsonify({'code': 400, 'message': 'kind 只能是 minutes 或 summary'}), 400
+
+    result = _meeting_documents(meeting_id)
+    if result is None:
+        return jsonify({'code': 404, 'message': '会议不存在'}), 404
+    if result.get('code') != 200:
+        return jsonify(result), result.get('code', 500)
+
+    described = minutes_writer.describe_documents(meeting)
+    path = os.path.join(described['directory'], name)
+    if not os.path.exists(path):
+        return jsonify({'code': 404, 'message': '文档不存在'}), 404
+
+    download_name = f'{meeting.title}_{name}'
+    return send_file(path, as_attachment=True, download_name=download_name,
+                     mimetype='text/markdown')
+
+
+@app.route('/api/documents')
+def list_meeting_documents():
+    """
+    按日期列出所有会议文档，方便查阅。
+
+    返回 {months: [{'month': '2026-10', 'meetings': [...]}, ...]}，
+    每个会议带两份文件的路径与是否存在；默认对缺失的文档按需补生成
+    （include_missing=1 时关闭补生成，只看现状）。
+    """
+    from modules import minutes_writer
+
+    include_missing = request.args.get('include_missing') not in ('1', 'true', 'yes')
+    meetings = Meeting.query.order_by(Meeting.date.desc()).all()
+
+    grouped = {}
+    for meeting in meetings:
+        segments = [t.to_dict() for t in
+                    Transcription.query.filter_by(meeting_id=meeting.id)
+                    .order_by(Transcription.start_time).all()]
+        if not segments and not (meeting.summary or '').strip():
+            continue
+        described = minutes_writer.describe_documents(meeting)
+        if include_missing and any(not item['exists'] for item in described['files']):
+            try:
+                report = ComplianceReport.query.filter_by(meeting_id=meeting.id).first()
+                compliance = None
+                if report:
+                    raw = report.to_dict()
+                    compliance = {
+                        'total_score': raw.get('total_score', 0),
+                        'score_level': raw.get('score_level', ''),
+                        'components': raw.get('detailed_scores') or {},
+                        'missing_points': raw.get('missing_points') or [],
+                        'risk_keywords': raw.get('risk_keywords') or [],
+                        'risk_time_markers': raw.get('risk_time_markers') or [],
+                        'suggestions': raw.get('suggestions') or [],
+                    }
+                stored = minutes_writer.write_documents(meeting, segments, compliance=compliance)
+                meeting.documents_dir = stored['directory']
+                db.session.commit()
+                described = minutes_writer.describe_documents(meeting)
+            except Exception as exc:
+                print(f'[文档] 补生成会议 {meeting.id} 文档失败: {exc}')
+
+        moment = meeting.date or meeting.created_at
+        month = moment.strftime('%Y-%m') if moment else '未知'
+        grouped.setdefault(month, []).append({
+            'meeting_id': meeting.id,
+            'title': meeting.title,
+            'date': moment.strftime('%Y-%m-%d %H:%M') if moment else '',
+            'duration': int(meeting.duration or 0),
+            'score': float(meeting.total_score) if meeting.total_score is not None else None,
+            'directory': described['directory'],
+            'documents': described['files'],
+        })
+
+    months = [{'month': month, 'meetings': items}
+              for month, items in sorted(grouped.items(), reverse=True)]
+    total = sum(len(item['meetings']) for item in months)
+    return jsonify({'code': 200, 'data': {'months': months, 'total': total}})
 
 @app.route('/api/reports/compliance-trend')
 def get_compliance_trend_report():

@@ -506,32 +506,43 @@ def test_noise_segment_filter():
 
 def test_speaker_fragment_merge():
     """
-    碎片簇（≤2 窗口 / <2.5s / 单连续段）应被归并，避免单说话人被拆成多人。
+    碎片簇（≤2 窗口 / <2.5s / 单连续段 / 占比 <8%）应被归并，避免单说话人被拆成多人。
 
     回归：真实单侧通话录音被判成 2 个说话人，多出来的簇只有 2 个窗口、1.7 秒。
+    占比门槛的意义与标定数据见 modules/speaker_diarization._merge_fragment_clusters：
+    真实录音里碎片簇的占比都 ≤3.7%，而真实说话人最少也有 23.6%；这里按真实录音的
+    量级构造样本（30 个窗口里 1 个碎片 ≈ 3.3%），短录音里占比 ≥8% 的小簇按设计保留
+    （那条路径由 tests/test_speaker_recognition.py 覆盖）。
     """
     print('\n[9d] 说话人碎片簇归并')
     import numpy as np
 
     from modules import speaker_diarization as sd
 
-    # 10 个窗口：前 9 个属于同一说话人，最后 1 个是边界抖动的碎片（1 窗口、1s）
-    base = np.random.default_rng(1).normal(0, 0.02, (9, 8)).astype(np.float32)
+    # 30 个窗口：前 29 个属于同一说话人，最后 1 个是边界抖动的碎片（1 窗口、1s）
+    base = np.random.default_rng(1).normal(0, 0.02, (29, 8)).astype(np.float32)
     base /= np.linalg.norm(base, axis=1, keepdims=True)
     frag = base[0:1] + np.random.default_rng(2).normal(0, 0.004, (1, 8)).astype(np.float32)
     frag /= np.linalg.norm(frag, axis=1, keepdims=True)
     embeddings = np.vstack([base, frag])
-    windows = [(i * 2.0, i * 2.0 + 1.5) for i in range(9)] + [(18.0, 19.0)]
-    labels = np.array([0] * 9 + [1], dtype=int)
+    windows = [(i * 2.0, i * 2.0 + 1.5) for i in range(29)] + [(58.0, 59.0)]
+    labels = np.array([0] * 29 + [1], dtype=int)
 
     merged = sd._merge_fragment_clusters(embeddings, labels, windows)
     record(f'碎片簇被归并（合并后簇数 {len(set(merged))}，期望 1）', len(set(merged)) == 1)
 
+    # 占比够大的小簇按设计保留：短录音里它更可能是真的第二个人
+    short_labels = np.array([0] * 9 + [1], dtype=int)
+    merged_short = sd._merge_fragment_clusters(
+        embeddings[:10], short_labels, windows[:10])
+    record(f'短录音里占比 10% 的小簇保留（簇数 {len(set(merged_short))}，期望 2）',
+           len(set(merged_short)) == 2)
+
     # 两个真正的说话人（各 5 个窗口，跨度长）不应被归并
     left = base[:5]
-    right = base[5:]
-    labels2 = np.array([0] * 5 + [1] * 4, dtype=int)
-    merged2 = sd._merge_fragment_clusters(np.vstack([left, right]), labels2, windows[:9])
+    right = base[5:10]
+    labels2 = np.array([0] * 5 + [1] * 5, dtype=int)
+    merged2 = sd._merge_fragment_clusters(np.vstack([left, right]), labels2, windows[:10])
     record(f'正常说话人簇不被误并（簇数 {len(set(merged2))}，期望 2）', len(set(merged2)) == 2)
 
 

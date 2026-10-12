@@ -20,6 +20,8 @@ class Meeting(db.Model):
     decisions = db.Column(db.Text)
     # 音频质量报告（降噪量 / 处理前后信噪比），JSON
     audio_quality = db.Column(db.Text)
+    # 会议文档目录（会议纪要 / 会议记录概要两份文件的落盘位置）
+    documents_dir = db.Column(db.String(500))
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, onupdate=datetime.now)
 
@@ -44,6 +46,7 @@ class Meeting(db.Model):
             'action_items': json.loads(self.action_items) if self.action_items else [],
             'decisions': json.loads(self.decisions) if self.decisions else [],
             'audio_quality': json.loads(self.audio_quality) if self.audio_quality else None,
+            'documents_dir': self.documents_dir or '',
             'created_at': self.created_at.isoformat()
         }
 
