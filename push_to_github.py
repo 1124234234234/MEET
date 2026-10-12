@@ -104,69 +104,82 @@ def push(branch, token):
         print('远端已是最新，无需推送')
         return 0
 
-    header = sh('cat-file', 'commit', 'HEAD').split('\n\n', 1)[0]
-    tree_sha = parent_sha = author_line = committer_line = None
-    for line in header.split('\n'):
-        if line.startswith('tree '):
-            tree_sha = line.split()[1]
-        elif line.startswith('parent '):
-            parent_sha = line.split()[1]
-        elif line.startswith('author '):
-            author_line = line[len('author '):]
-        elif line.startswith('committer '):
-            committer_line = line[len('committer '):]
-    if remote_head != parent_sha:
-        print(f'远端 HEAD {remote_head[:10]} 与本地父提交 {str(parent_sha)[:10]} 不一致，已停止（避免覆盖别人的提交）')
+    # 待推送的提交（按老到新）。远端 HEAD 必须是本地的祖先，否则说明远端有
+    # 本地没有的提交，直接停下，绝不强推覆盖别人的内容。
+    pending = [line.strip() for line in
+               sh('rev-list', '--reverse', f'{remote_head}..HEAD').splitlines() if line.strip()]
+    if not pending:
+        print('本地没有落后于远端的新提交（远端可能已包含本地历史）')
         return 3
 
-    raw = sh('-c', 'core.quotepath=false', 'ls-tree', '-r', '-z', 'HEAD')
-    items = []
-    for record in raw.split('\0'):
-        if not record.strip():
-            continue
-        meta, path = record.split('\t', 1)
-        mode, otype, sha = meta.split()
-        if otype != 'blob':
-            continue
-        content = sh('cat-file', 'blob', sha, binary=True)
-        status, blob = api('POST', f'/repos/{OWNER}/{REPO}/git/blobs',
-                           {'content': base64.b64encode(content).decode('ascii'),
-                            'encoding': 'base64'}, token=token)
+    blob_cache = {}
+    parent_sha = remote_head
+    for index, commit_sha in enumerate(pending, 1):
+        header = sh('cat-file', 'commit', commit_sha).split('\n\n', 1)[0]
+        tree_sha = author_line = committer_line = None
+        for line in header.split('\n'):
+            if line.startswith('tree '):
+                tree_sha = line.split()[1]
+            elif line.startswith('author '):
+                author_line = line[len('author '):]
+            elif line.startswith('committer '):
+                committer_line = line[len('committer '):]
+
+        raw = sh('-c', 'core.quotepath=false', 'ls-tree', '-r', '-z', commit_sha)
+        items = []
+        uploaded = 0
+        for record in raw.split('\0'):
+            if not record.strip():
+                continue
+            meta, path = record.split('\t', 1)
+            mode, otype, sha = meta.split()
+            if otype != 'blob':
+                continue
+            if sha not in blob_cache:
+                content = sh('cat-file', 'blob', sha, binary=True)
+                status, blob = api('POST', f'/repos/{OWNER}/{REPO}/git/blobs',
+                                   {'content': base64.b64encode(content).decode('ascii'),
+                                    'encoding': 'base64'}, token=token)
+                if status not in (200, 201):
+                    print(f'  上传 {path} 失败: HTTP {status} {str(blob)[:200]}')
+                    return 1
+                blob_cache[sha] = blob['sha']
+                uploaded += 1
+            items.append({'path': path, 'mode': mode, 'type': 'blob',
+                          'sha': blob_cache[sha]})
+
+        status, tree = api('POST', f'/repos/{OWNER}/{REPO}/git/trees', {'tree': items}, token=token)
         if status not in (200, 201):
-            print(f'  上传 {path} 失败: HTTP {status} {str(blob)[:200]}')
+            print(f'  建树失败: HTTP {status} {str(tree)[:200]}')
             return 1
-        items.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': blob['sha']})
-    print(f'  已上传 {len(items)} 个文件')
+        if tree['sha'] != tree_sha:
+            print(f'  树哈希不一致（本地 {tree_sha[:10]} / 远端 {tree["sha"][:10]}），停止')
+            return 1
 
-    status, tree = api('POST', f'/repos/{OWNER}/{REPO}/git/trees', {'tree': items}, token=token)
-    if status not in (200, 201):
-        print(f'  建树失败: HTTP {status} {str(tree)[:200]}')
-        return 1
-    if tree['sha'] != tree_sha:
-        print(f'  树哈希不一致（本地 {tree_sha[:10]} / 远端 {tree["sha"][:10]}），停止')
-        return 1
-
-    message = sh('log', '-1', '--format=%B').rstrip() + '\n'
-    status, commit = api('POST', f'/repos/{OWNER}/{REPO}/git/commits', {
-        'message': message,
-        'tree': tree['sha'],
-        'parents': [parent_sha],
-        'author': parse_ident(author_line),
-        'committer': parse_ident(committer_line),
-    }, token=token)
-    if status not in (200, 201):
-        print(f'  建提交失败: HTTP {status} {str(commit)[:200]}')
-        return 1
-    if commit['sha'] != head_sha:
-        print(f'  提交哈希不一致（本地 {head_sha[:10]} / 远端 {commit["sha"][:10]}），停止')
-        return 1
+        message = sh('cat-file', 'commit', commit_sha)
+        message = message.split('\n\n', 1)[1] if '\n\n' in message else ''
+        status, commit = api('POST', f'/repos/{OWNER}/{REPO}/git/commits', {
+            'message': message.rstrip() + '\n',
+            'tree': tree['sha'],
+            'parents': [parent_sha],
+            'author': parse_ident(author_line),
+            'committer': parse_ident(committer_line),
+        }, token=token)
+        if status not in (200, 201):
+            print(f'  建提交失败: HTTP {status} {str(commit)[:200]}')
+            return 1
+        if commit['sha'] != commit_sha:
+            print(f'  提交哈希不一致（本地 {commit_sha[:10]} / 远端 {commit["sha"][:10]}），停止')
+            return 1
+        parent_sha = commit['sha']
+        print(f'  [{index}/{len(pending)}] {commit_sha[:10]} 已推送（新上传 {uploaded} 个文件）')
 
     status, body = api('PATCH', f'/repos/{OWNER}/{REPO}/git/refs/heads/{branch}',
-                       {'sha': commit['sha'], 'force': False}, token=token)
+                       {'sha': parent_sha, 'force': False}, token=token)
     if status not in (200, 201):
         print(f'  更新分支失败: HTTP {status} {str(body)[:200]}')
         return 1
-    print(f'  远端 {branch} 已更新为 {commit["sha"][:10]}（与本地一致）')
+    print(f'  远端 {branch} 已更新为 {parent_sha[:10]}（与本地一致）')
     return 0
 
 
