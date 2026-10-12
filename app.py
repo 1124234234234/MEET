@@ -369,6 +369,24 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
 
         sentiment = analyze_sentiment(full_text)
 
+        # 会议纪要正文（公文体分条）：先走规则归纳（毫秒级，口语压缩 + 公文引导语），
+        # 大模型改写放到后台线程（save_meeting / 分析收尾后触发），
+        # 免得用户为了措辞多等半分钟
+        minutes_body = None
+        try:
+            from modules.text_analyzer import distill_minutes
+
+            minutes_body = distill_minutes(
+                full_text,
+                decisions=decisions,
+                actions=action_items,
+                keywords=[kw.get('word') if isinstance(kw, dict) else kw
+                          for kw in (keywords or [])],
+                use_model=False,
+            )
+        except Exception as exc:
+            print(f'Meeting {meeting_id}: 纪要正文归纳失败（不影响其它结果）: {exc}')
+
         duration = int(max((s.get('end_time') or 0) for s in raw_segments)) if raw_segments else 0
 
         # 数据库相关操作统一放在应用上下文中（线程内默认没有上下文）
@@ -411,6 +429,8 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
             meeting.sentiment = json.dumps(sentiment, ensure_ascii=False)
             meeting.action_items = json.dumps(action_items, ensure_ascii=False)
             meeting.decisions = json.dumps(decisions, ensure_ascii=False)
+            if minutes_body:
+                meeting.minutes_body = json.dumps(minutes_body, ensure_ascii=False)
             if audio_quality:
                 meeting.audio_quality = json.dumps(audio_quality, ensure_ascii=False)
 
@@ -446,6 +466,8 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
                 meeting.documents_dir = stored['directory']
                 db.session.commit()
                 print(f'Meeting {meeting_id}: 会议文档已生成 -> {stored["directory"]}')
+                # 纪要正文的大模型改写放后台：分析结果先给用户，几十秒后自动刷新文档
+                minutes_writer.schedule_refinement(meeting_id)
             except Exception as exc:
                 db.session.rollback()
                 print(f'Meeting {meeting_id}: 生成会议文档失败（不影响入库）: {exc}')
@@ -1034,8 +1056,12 @@ def get_meeting_summary_report(meeting_id):
 # 会议纪要 / 会议记录概要两份文件：按日期分月存到 records/ 下，
 # 这里提供查看、下载、重新生成与按日期浏览的接口。
 
-def _meeting_documents(meeting_id, regenerate=False):
-    """取（必要时生成）某场会议的两份文档，返回给接口的字典。"""
+def _meeting_documents(meeting_id, regenerate=False, distill=False):
+    """取（必要时生成）某场会议的三份文档，返回给接口的字典。
+
+    distill=True 时（重新）跑一次纪要正文归纳（大模型改写 + 规则兜底）并缓存进会议记录；
+    否则直接用缓存，没有缓存时才现场归纳。
+    """
     from modules import minutes_writer
 
     meeting = Meeting.query.get(meeting_id)
@@ -1062,10 +1088,30 @@ def _meeting_documents(meeting_id, regenerate=False):
             'suggestions': raw.get('suggestions') or [],
         }
 
+    # 纪要正文：有缓存就用缓存，没有（或要求重新归纳）就现在归纳一次
+    body = meeting_store._minutes_body_of(meeting)
+    if distill or not body:
+        try:
+            from modules.text_analyzer import distill_minutes
+
+            full_text = ''.join(segment.get('text') or '' for segment in segments)
+            body = distill_minutes(
+                full_text,
+                decisions=json.loads(meeting.decisions) if meeting.decisions else [],
+                actions=json.loads(meeting.action_items) if meeting.action_items else [],
+                keywords=json.loads(meeting.keywords) if meeting.keywords else [],
+                use_model=distill or None,
+            )
+            if body:
+                meeting.minutes_body = json.dumps(body, ensure_ascii=False)
+                db.session.commit()
+        except Exception as exc:
+            print(f'[文档] 纪要正文归纳失败，改用按发言人列要点: {exc}')
+
     described = minutes_writer.describe_documents(meeting)
     missing = [item for item in described['files'] if not item['exists']]
     if regenerate or missing or not meeting.documents_dir:
-        stored = minutes_writer.write_documents(meeting, segments, compliance=compliance)
+        stored = minutes_writer.write_documents(meeting, segments, compliance=compliance, body=body)
         meeting.documents_dir = stored['directory']
         db.session.commit()
         described = minutes_writer.describe_documents(meeting)
@@ -1104,8 +1150,13 @@ def get_meeting_documents(meeting_id):
 
 @app.route('/api/meetings/<int:meeting_id>/documents', methods=['POST'])
 def regenerate_meeting_documents(meeting_id):
-    """重新生成会议文档（纪要/概要内容会随最新分析结果刷新）。"""
-    result = _meeting_documents(meeting_id, regenerate=True)
+    """重新生成会议文档（纪要/概要内容会随最新分析结果刷新）。
+
+    请求体可选 {"distill": true}：连纪要正文一起重新归纳（跑一次大模型改写）。
+    """
+    payload = request.get_json(silent=True) or {}
+    distill = bool(payload.get('distill')) if isinstance(payload, dict) else False
+    result = _meeting_documents(meeting_id, regenerate=True, distill=distill)
     if result is None:
         return jsonify({'code': 404, 'message': '会议不存在'}), 404
     if result.get('code') != 200:

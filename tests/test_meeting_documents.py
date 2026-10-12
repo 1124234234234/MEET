@@ -76,6 +76,43 @@ COMPLIANCE = {
 }
 
 
+def test_distilled_body_in_minutes():
+    """把归纳好的纪要正文写进纪要（公文引导语分条），并覆盖 distill_minutes 规则路径。"""
+    print('\n[1c] 纪要正文（公文体分条）')
+    from modules import minutes_writer
+    from modules.text_analyzer import distill_minutes
+
+    # 1) 规则归纳（不依赖大模型）：口语要压缩、人称要转成「本方/对方」、带引导语
+    spoken = ('唉，李总你好，我是中国人寿的小王。现在之前王总啊给我推荐联系您啊，'
+              '他之前在我这边配置了那个全家医疗险和重疾险，觉得咱们这个方案还是比较实在的。'
+              '我也想跟您简单对接一下，给您做一份免费的家庭保单体检，给咱们保障啊。')
+    body = distill_minutes(spoken, use_model=False)
+    record('规则归纳出条目', bool(body) and len(body) >= 2, f'{len(body or [])} 条')
+    joined = '\n'.join(body or [])
+    record('条目带公文引导语', any(lead in joined for lead in
+                                ('会议听取了', '会议认为', '会议指出', '会议强调', '会议明确')))
+    record('口语人称已规范化（本方/对方）', '本方' in joined or '对方' in joined)
+    record('寒暄被剔除（不含「李总你好」）', '你好' not in joined)
+    record('条目带编号', (body or [''])[0].strip().startswith('1.'))
+
+    # 2) 正文写进纪要：二、章节用归纳好的条目，不再罗列逐字发言
+    root = tempfile.mkdtemp(prefix='records_test_')
+    try:
+        meeting = FakeMeeting(id=31)
+        stored = minutes_writer.write_documents(meeting, SEGMENTS, body=body, root=root)
+        minutes = open(stored['minutes'], encoding='utf-8-sig').read()
+        record('纪要正文采用归纳条目', (body or [''])[0] in minutes)
+        record('纪要正文不再照抄逐字发言（无（一）SPEAKER_00 段落）',
+               '（一）SPEAKER_00' not in minutes)
+
+        # 3) 没有归纳结果时退回按发言人列要点（老记录仍可用）
+        legacy = minutes_writer.write_documents(meeting, SEGMENTS, root=root)
+        legacy_minutes = open(legacy['minutes'], encoding='utf-8-sig').read()
+        record('无归纳结果时退回按发言人列要点', '（一）SPEAKER_00' in legacy_minutes)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_basic_generation():
     """三份文件生成、目录结构、公文格式章节完整性。"""
     print('\n[1] 基本生成与目录结构（会议纪要按公文格式）')
@@ -386,7 +423,8 @@ def main():
     print('=' * 68)
     print('会议文档生成测试')
     print('=' * 68)
-    for func in (test_basic_generation, test_missing_public_fields, test_filename_safety,
+    for func in (test_distilled_body_in_minutes, test_basic_generation,
+                 test_missing_public_fields, test_filename_safety,
                  test_describe_and_regenerate, test_api_endpoints, test_update_public_fields,
                  test_save_meeting_writes_documents):
         try:

@@ -24,6 +24,8 @@ _MEETING_COLUMNS = [
     ('location', 'TEXT'),
     ('host', 'TEXT'),
     ('recorder', 'TEXT'),
+    # 归纳好的纪要正文（JSON 列表）
+    ('minutes_body', 'TEXT'),
 ]
 
 
@@ -79,6 +81,7 @@ def save_meeting(
     language='zh',
     status='finished',
     documents_root=None,
+    minutes_body=None,
 ):
     """
     保存一场会议（会议主体 + 转写分句 + 合规报告 + 会议文档）。
@@ -106,6 +109,7 @@ def save_meeting(
             action_items=_as_json(action_items or []),
             decisions=_as_json(decisions or []),
             audio_quality=_as_json(audio_quality) if audio_quality else None,
+            minutes_body=_as_json(minutes_body) if minutes_body else None,
         )
         db.session.add(meeting)
         db.session.commit()
@@ -140,7 +144,7 @@ def save_meeting(
             meeting.score_level = compliance.get('score_level', '')
             db.session.commit()
 
-        # 会议文档（会议纪要 / 会议记录概要）：失败只记日志，不影响会议入库
+        # 会议文档（会议纪要 / 会议记录概要 / 会议记录全文）：失败只记日志，不影响会议入库
         try:
             from modules import minutes_writer
 
@@ -149,9 +153,12 @@ def save_meeting(
                 [segment.to_dict() for segment in meeting.transcriptions],
                 compliance=_compliance_payload(compliance),
                 root=documents_root,
+                body=_minutes_body_of(meeting),
             )
             meeting.documents_dir = stored['directory']
             db.session.commit()
+            # 纪要正文的大模型改写放后台：先把可用纪要给用户，几十秒后自动刷新
+            minutes_writer.schedule_refinement(meeting.id)
         except Exception as exc:
             print(f'[文档] 生成会议文档失败（不影响入库）: {exc}')
             db.session.rollback()
@@ -164,6 +171,20 @@ def save_meeting(
         import traceback
         traceback.print_exc()
         return None
+
+
+def _minutes_body_of(meeting):
+    """取会议记录里缓存的纪要正文条目（JSON 字符串 → 列表）。"""
+    raw = getattr(meeting, 'minutes_body', None)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return None
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed if str(item).strip()] or None
+    return None
 
 
 def _compliance_payload(compliance):

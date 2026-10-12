@@ -77,6 +77,7 @@ def analyze_audio(
 
         started = time.time()
         segments = None
+        minutes_body = None
 
         # ---------- 1. 识别 ----------
         if transcription_text:
@@ -194,6 +195,24 @@ def analyze_audio(
         sentiment = analyze_sentiment(full_text, language=language)
         _stage('情绪分析', stage_started)
 
+        # 会议纪要正文（公文体分条）：先走规则归纳（毫秒级，口语压缩 + 公文引导语）。
+        # 大模型改写由调用方在写库后放后台线程刷新（见 minutes_writer.schedule_refinement），
+        # 避免用户为了措辞多等半分钟。
+        stage_started = time.time()
+        try:
+            from modules.text_analyzer import distill_minutes
+
+            minutes_body = distill_minutes(
+                full_text, language=language,
+                decisions=decisions, actions=action_items,
+                keywords=[kw.get('word') if isinstance(kw, dict) else kw for kw in (keywords or [])],
+                use_model=False,
+            )
+        except Exception as exc:
+            print(f'[分析流水线] 纪要正文归纳失败（不影响其它结果）: {exc}')
+            minutes_body = None
+        _stage('纪要正文（规则）', stage_started)
+
         # ---------- 4. 音频质量报告 ----------
         audio_quality = None
         processed_path = audio_path.rsplit('.', 1)[0] + '_processed.wav'
@@ -230,6 +249,7 @@ def analyze_audio(
             'sentiment': sentiment,
             'action_items': action_items,
             'decisions': decisions,
+            'minutes_body': minutes_body,
             'audio_quality': audio_quality,
             'compliance_report': compliance_result,
             'compliance': compliance_result,

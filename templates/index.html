@@ -587,7 +587,9 @@
 
             const flushParagraph = () => {
                 if (paragraph.length) {
-                    html += `<p>${inlineMd(paragraph.join(' '))}</p>`;
+                    // 行内换行用 <br> 保留：公文的信息项（会议名称/时间/地点…）
+                    // 是逐行写的，拼成一段会糊成一坨
+                    html += `<p>${paragraph.map(inlineMd).join('<br>')}</p>`;
                     paragraph = [];
                 }
             };

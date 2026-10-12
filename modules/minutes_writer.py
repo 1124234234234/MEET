@@ -32,6 +32,7 @@ Windows 记事本 / Excel 直接打开不会乱码。
 import json
 import os
 import re
+import time
 from datetime import datetime
 
 # 默认根目录：项目下的 records/
@@ -257,7 +258,7 @@ def _discussion_points(transcriptions, compliance=None, max_points=12):
     return points
 
 
-def build_minutes_document(meeting, transcriptions, compliance=None):
+def build_minutes_document(meeting, transcriptions, compliance=None, body=None):
     """
     会议纪要：按公文通用格式撰写。
 
@@ -268,11 +269,16 @@ def build_minutes_document(meeting, transcriptions, compliance=None):
         标题：×××会议纪要
         会议名称 / 时间 / 地点 / 主持人 / 出席人员 / 列席人员 / 缺席人员 / 记录人 / 会议议题
         一、会议概况          —— 会议召开情况与总体内容
-        二、会议听取了下列发言 —— 发言提要法：按发言人整理发言要点
+        二、会议听取了下列发言 —— 纪要正文：由 text_analyzer.distill_minutes 归纳
+                                  （口语转规范语、分条、带公文引导语），
+                                  没有归纳结果时退回按发言人列要点
         三、会议决定          —— 议定事项，分条列述
         四、会议要求          —— 落实要求与任务分工
         五、合规与风险提示    —— 本系统的合规比对结论
         落款                  —— 整理单位 + 成文日期
+
+    body 是已经归纳好的正文条目列表（形如 ['1. 会议听取了，……', ...]），
+    由调用方（分析流水线 / 接口）生成并缓存到 meeting.minutes_body。
     """
     title = getattr(meeting, 'title', '') or '未命名会议'
     created = getattr(meeting, 'date', None) or getattr(meeting, 'created_at', None)
@@ -289,6 +295,11 @@ def build_minutes_document(meeting, transcriptions, compliance=None):
     keywords = [str(k.get('word') if isinstance(k, dict) else k)
                 for k in _as_list(getattr(meeting, 'keywords', None))]
     topic_text = '、'.join(topics[:5]) if topics else '（待补充）'
+
+    if body is None:
+        body = _as_list(getattr(meeting, 'minutes_body', None))
+        if isinstance(body, str):
+            body = [line for line in body.split('\n') if line.strip()]
 
     speakers = {}
     for seg in transcriptions or []:
@@ -326,29 +337,34 @@ def build_minutes_document(meeting, transcriptions, compliance=None):
         lines.append(f'本次会议涉及的关键词：{"、".join(keywords[:12])}。')
     lines.append('')
 
-    # ---- 会议听取了下列发言（发言提要法：按发言人合并连续发言）----
+    # ---- 二、会议内容：优先用归纳好的纪要正文 ----
     lines.append('## 二、会议听取了下列发言')
-    points = _discussion_points(transcriptions)
-    if points:
-        blocks = []
-        for item in points:
-            if blocks and blocks[-1]['speaker'] == item['speaker']:
-                blocks[-1]['items'].append(item)
-            else:
-                blocks.append({'speaker': item['speaker'], 'items': [item]})
-        for index, block in enumerate(blocks, 1):
-            # 序号从「（一）」开始：_CN_NUMBERS 下标从 0 起
-            order = _CN_NUMBERS[index - 1] if index <= len(_CN_NUMBERS) else str(index)
-            head = f'（{order}）{block["speaker"]}'
-            if len(block['items']) == 1:
-                item = block['items'][0]
-                lines.append(f'{head}：{item["text"]}')
-            else:
-                lines.append(f'{head}：')
-                for item in block['items']:
-                    lines.append(f'- [{item["time"]}] {item["text"]}')
+    if body:
+        for item in body:
+            text = str(item).strip()
+            if text:
+                lines.append(text)
     else:
-        lines.append('（本次会议没有可用的转写内容）')
+        # 没有归纳结果（例如老记录）：退回按发言人整理发言要点
+        points = _discussion_points(transcriptions)
+        if points:
+            blocks = []
+            for item in points:
+                if blocks and blocks[-1]['speaker'] == item['speaker']:
+                    blocks[-1]['items'].append(item)
+                else:
+                    blocks.append({'speaker': item['speaker'], 'items': [item]})
+            for index, block in enumerate(blocks, 1):
+                order = _CN_NUMBERS[index - 1] if index <= len(_CN_NUMBERS) else str(index)
+                head = f'（{order}）{block["speaker"]}'
+                if len(block['items']) == 1:
+                    lines.append(f'{head}：{block["items"][0]["text"]}')
+                else:
+                    lines.append(f'{head}：')
+                    for item in block['items']:
+                        lines.append(f'- [{item["time"]}] {item["text"]}')
+        else:
+            lines.append('（本次会议没有可用的转写内容）')
     lines.append('')
 
     lines.append('## 三、会议决定')
@@ -452,12 +468,13 @@ def build_transcript_document(meeting, transcriptions):
 # ------------------------------------------------------------------ 写盘
 
 
-def write_documents(meeting, transcriptions=None, compliance=None, root=None):
+def write_documents(meeting, transcriptions=None, compliance=None, root=None, body=None):
     """
     为一场会议写出三份文件，返回 {directory, minutes, summary, transcript}。
 
     meeting 可以是数据库模型对象，也可以是带同名属性的普通对象；
-    transcriptions 支持 [{'speaker','text','start_time','end_time'}, ...]。
+    transcriptions 支持 [{'speaker','text','start_time','end_time'}, ...]；
+    body 是归纳好的纪要正文条目（不传时用 meeting.minutes_body 缓存）。
     """
     root = root or DEFAULT_ROOT
     created = getattr(meeting, 'date', None) or getattr(meeting, 'created_at', None)
@@ -467,7 +484,7 @@ def write_documents(meeting, transcriptions=None, compliance=None, root=None):
     minutes_path = os.path.join(directory, MINUTES_NAME)
     summary_path = os.path.join(directory, SUMMARY_NAME)
     transcript_path = os.path.join(directory, TRANSCRIPT_NAME)
-    _write(minutes_path, build_minutes_document(meeting, transcriptions, compliance))
+    _write(minutes_path, build_minutes_document(meeting, transcriptions, compliance, body=body))
     _write(summary_path, build_summary_document(meeting, transcriptions, compliance))
     _write(transcript_path, build_transcript_document(meeting, transcriptions))
     return {'directory': directory, 'minutes': minutes_path, 'summary': summary_path,
@@ -491,6 +508,89 @@ def describe_documents(meeting, root=None):
             'size': os.path.getsize(path) if exists else 0,
         })
     return {'directory': directory, 'files': files}
+
+
+def schedule_refinement(meeting_id, delay=0.0):
+    """
+    后台用大模型重新归纳纪要正文，完成后刷新文档文件。
+
+    为什么放后台：1.5B 模型改写要 30~60 秒（本机 CPU），让用户干等不值得 ——
+    分析一结束就先用规则归纳写出一份可用纪要（瞬间完成），这里再在后台把措辞
+    换成公文体（口语转规范语），改完自动刷新文件。用户不需要做任何操作，
+    再次打开纪要时看到的就是改写版。
+
+    Returns:
+        True 表示已排入后台线程；False 表示没排（没有转写内容 / 线程创建失败）。
+    """
+    import threading
+
+    def _worker():
+        try:
+            time.sleep(delay)
+        except Exception:
+            pass
+        try:
+            from app import app as flask_app
+            from database import db
+            from models import ComplianceReport, Meeting, Transcription
+        except Exception as exc:
+            print(f'[纪要] 后台改写不可用（无法导入应用上下文）: {exc}')
+            return
+
+        try:
+            with flask_app.app_context():
+                meeting = Meeting.query.get(meeting_id)
+                if not meeting:
+                    return
+                segments = [t.to_dict() for t in
+                            Transcription.query.filter_by(meeting_id=meeting_id)
+                            .order_by(Transcription.start_time).all()]
+                if not segments:
+                    return
+
+                from modules.text_analyzer import distill_minutes
+
+                keywords = _as_list(getattr(meeting, 'keywords', None))
+                body = distill_minutes(
+                    ''.join(segment.get('text') or '' for segment in segments),
+                    decisions=[str(item) for item in _as_list(meeting.decisions)],
+                    actions=[str(item) for item in _as_list(meeting.action_items)],
+                    keywords=keywords,
+                    use_model=True,
+                )
+                if not body:
+                    print(f'[纪要] 会议 {meeting_id} 后台改写没有结果，保留规则版')
+                    return
+
+                meeting.minutes_body = json.dumps(body, ensure_ascii=False)
+                report = ComplianceReport.query.filter_by(meeting_id=meeting_id).first()
+                compliance = None
+                if report:
+                    raw = report.to_dict()
+                    compliance = {
+                        'total_score': raw.get('total_score', 0),
+                        'score_level': raw.get('score_level', ''),
+                        'components': raw.get('detailed_scores') or {},
+                        'missing_points': raw.get('missing_points') or [],
+                        'risk_keywords': raw.get('risk_keywords') or [],
+                        'risk_time_markers': raw.get('risk_time_markers') or [],
+                        'suggestions': raw.get('suggestions') or [],
+                    }
+                stored = write_documents(meeting, segments, compliance=compliance, body=body)
+                meeting.documents_dir = stored['directory']
+                db.session.commit()
+                print(f'[纪要] 会议 {meeting_id} 纪要正文已改写并刷新文档')
+        except Exception as exc:
+            print(f'[纪要] 会议 {meeting_id} 后台改写失败（保留规则版）: {exc}')
+
+    try:
+        thread = threading.Thread(target=_worker, daemon=True,
+                                 name=f'minutes-refine-{meeting_id}')
+        thread.start()
+        return True
+    except Exception as exc:
+        print(f'[纪要] 后台改写线程创建失败: {exc}')
+        return False
     files = []
     for kind, name in (('minutes', MINUTES_NAME), ('summary', SUMMARY_NAME)):
         path = os.path.join(directory, name)

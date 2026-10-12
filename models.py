@@ -26,6 +26,9 @@ class Meeting(db.Model):
     location = db.Column(db.String(255))
     host = db.Column(db.String(128))
     recorder = db.Column(db.String(128))
+    # 归纳好的纪要正文条目（JSON 列表，分析时由大模型+规则生成并缓存，
+    # 重新生成文档时直接复用，不再重复跑模型）
+    minutes_body = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, onupdate=datetime.now)
 
