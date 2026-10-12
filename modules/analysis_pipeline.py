@@ -25,6 +25,13 @@ def _update(progress_callback, percent, message):
             print(f'进度回调失败: {exc}')
 
 
+def _stage(name, started):
+    """记录单个环节耗时，便于定位「分析慢」到底慢在哪一步。"""
+    elapsed = time.time() - started
+    print(f'[分析流水线] {name} 耗时 {elapsed:.1f}s')
+    return elapsed
+
+
 def analyze_audio(
     audio_path,
     language='zh',
@@ -95,6 +102,7 @@ def analyze_audio(
             # 识别原始音频（见 tests/test_voice_pipeline.py 的转写准确率用例），
             # 因此对外接口与实时会议停止后的重转写都统一走这一步。
             analysis_audio_path = audio_path
+            stage_started = time.time()
             if not audio_path.endswith('_processed.wav'):
                 pre_path = audio_path.rsplit('.', 1)[0] + '_processed.wav'
                 try:
@@ -105,11 +113,13 @@ def analyze_audio(
                         analysis_audio_path = pre_path
                 except Exception as exc:
                     print(f'[分析流水线] 音频预处理失败，改用原始音频识别: {exc}')
+            _stage('音频预处理', stage_started)
 
             _update(progress_callback, 25, '正在分段与识别...')
             # 热词增强：知识库关键词 + 配置默认行业词汇（需求：行业词汇库热词解码）
             if hotwords is None:
                 hotwords = asr_engine.build_hotwords(knowledge_items)
+            stage_started = time.time()
             result = asr_engine.transcribe(
                 analysis_audio_path,
                 language=language,
@@ -126,7 +136,7 @@ def analyze_audio(
             } for seg in result['segments']]
             detected_language = result.get('language') or detected_language or language
             print(f'[分析流水线] 识别完成，引擎={result.get("engine")}，'
-                  f'耗时 {time.time()-started:.1f}s，{len(segments)} 句')
+                  f'耗时 {time.time()-stage_started:.1f}s，{len(segments)} 句')
 
         if not full_text or not full_text.strip():
             _update(progress_callback, -1, '未识别到有效语音内容')
@@ -152,20 +162,37 @@ def analyze_audio(
                 print(f'[分析流水线] 说话人分离失败: {exc}')
 
         # ---------- 3. 文本分析 ----------
+        # 各环节分别计时：摘要大模型是关键路径（CPU 上要十几到几十秒），
+        # 其余环节都在秒级，日志里能直接看出瓶颈在哪。
         _update(progress_callback, 55, '正在提取关键词...')
+        stage_started = time.time()
         keywords = extract_keywords(full_text, top_n=10, language=language)
+        _stage('关键词提取', stage_started)
 
         _update(progress_callback, 65, '正在分析主题...')
+        stage_started = time.time()
         topics = analyze_topic(full_text, language=language)
+        _stage('主题分析', stage_started)
 
-        _update(progress_callback, 75, '正在生成会议摘要...')
-        summary = generate_summary(full_text, max_length=300, language=language)
+        # 摘要这一步在 CPU 上要十几到几十秒（faster 的精度加载方式见
+        # text_analyzer.QWEN_LOAD_DTYPE 的说明），进度里直接说清楚，
+        # 免得用户以为卡住了。
+        _update(progress_callback, 75, '正在生成会议摘要（CPU 推理，约需 20~40 秒）...')
+        stage_started = time.time()
+        # 关键词与主题直接复用上面算好的结果（否则内部会再算一遍）
+        summary = generate_summary(full_text, max_length=300, language=language,
+                                   keywords=keywords, topics=topics)
+        _stage('会议摘要', stage_started)
 
         _update(progress_callback, 80, '正在提取待办事项与决议...')
+        stage_started = time.time()
         action_items = extract_action_items(full_text, language=language)
         decisions = extract_decisions(full_text, language=language)
+        _stage('待办与决议', stage_started)
 
+        stage_started = time.time()
         sentiment = analyze_sentiment(full_text, language=language)
+        _stage('情绪分析', stage_started)
 
         # ---------- 4. 音频质量报告 ----------
         audio_quality = None

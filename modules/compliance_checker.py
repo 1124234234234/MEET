@@ -485,25 +485,56 @@ def compute_semantic_similarity(text1, text2):
     try:
         text1 = (text1 or '').strip()
         text2 = (text2 or '').strip()
-        
+
         if not text1 or not text2:
             return 0.0
-        
+
         from sentence_transformers import util
-        
+
         model = _get_compliance_model()
         if model is None:
             return simple_similarity(text1, text2)
-        
-        embedding1 = model.encode(text1, convert_to_tensor=True)
-        embedding2 = model.encode(text2, convert_to_tensor=True)
-        
+
+        embedding1 = _encode_cached(model, text1)
+        embedding2 = _encode_cached(model, text2)
+        if embedding1 is None or embedding2 is None:
+            return simple_similarity(text1, text2)
+
         cosine_score = util.cos_sim(embedding1, embedding2).item()
         return cosine_score
-    
+
     except Exception as e:
         print(f"Semantic similarity failed: {e}, using simple similarity")
         return simple_similarity(text1, text2)
+
+
+# 句向量缓存：一次合规比对里，同一段转写文本要跟多条政策/要点模板比相似度
+# （实测同一段全文被重复编码 7~10 次）。编码结果只取决于文本，缓存不会改变
+# 任何计算结果，只是把重复计算省掉。
+_embedding_cache = {}
+_EMBEDDING_CACHE_MAX = 128
+
+
+def _encode_cached(model, text):
+    """编码句向量（带缓存）。"""
+    key = (len(text), hash(text))
+    cached = _embedding_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        embedding = model.encode(text, convert_to_tensor=True)
+    except Exception as exc:
+        print(f"句向量编码失败: {exc}")
+        return None
+    if len(_embedding_cache) >= _EMBEDDING_CACHE_MAX:
+        _embedding_cache.clear()
+    _embedding_cache[key] = embedding
+    return embedding
+
+
+def clear_embedding_cache():
+    """清空句向量缓存（模型切换或内存紧张时可用）。"""
+    _embedding_cache.clear()
 
 
 def simple_similarity(text1, text2):

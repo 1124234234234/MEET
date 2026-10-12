@@ -23,6 +23,11 @@ class Config:
     VOICE_API_TIMEOUT = int(os.environ.get('VOICE_API_TIMEOUT', '1800'))
     # 是否使用大模型生成摘要（关闭后摘要退回 TextRank 抽取式，速度更快、占用更低）
     ENABLE_TEXT_MODELS = os.environ.get('ENABLE_TEXT_MODELS', 'true').lower() in {'1', 'true', 'yes'}
+    # 摘要大模型的加载精度：auto（默认，沿用权重自带的 bf16，约 3GB）
+    # 或 float32（约 6GB，但本机 torch 的 CPU bf16 矩阵乘是标量实现、慢 100 倍以上，
+    # fp32 的预填充快 6.5 倍；只有在空闲内存 ≥8GB 时才值得开，否则会把系统逼进
+    # 内存压缩反而更慢）。详见 modules/text_analyzer.py 的 QWEN_LOAD_DTYPE 注释。
+    SUMMARY_MODEL_DTYPE = os.environ.get('SUMMARY_MODEL_DTYPE', 'auto')
 
     # ASR 热词（行业词汇增强）：空格分隔，会与知识库关键词合并后交给识别引擎，
     # 同时注册进 jieba 词典（避免「中国人寿」被切成「中国」+「人寿」）。

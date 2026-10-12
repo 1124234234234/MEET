@@ -246,7 +246,8 @@ def main():
 
     say('  正在启动服务进程...', CYAN)
     process = subprocess.Popen(
-        [sys.executable, '-X', 'utf8', os.path.join(BASE_DIR, 'app.py')],
+        # -u 关掉输出缓冲：否则日志按块缓冲，排查「卡在哪一步」时看不到实时进度
+        [sys.executable, '-u', '-X', 'utf8', os.path.join(BASE_DIR, 'app.py')],
         cwd=BASE_DIR,
         env=env,
     )

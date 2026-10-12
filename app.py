@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import uuid
 import threading
 from datetime import datetime, timedelta
@@ -35,7 +36,7 @@ register_socketio_events(socketio)
 
 # 语音识别与模型加载：统一走 asr_engine（FunASR 优先，Whisper 自动兜底）
 _engine_lock = threading.Lock()
-_engine_ready = {'asr': False, 'vad': False}
+_engine_ready = {'asr': False, 'vad': False, 'pipeline': False}
 
 
 def init_asr_models():
@@ -52,6 +53,16 @@ def init_asr_models():
 
             model_registry.get_vad_model()
             _engine_ready['vad'] = True
+        if not _engine_ready['pipeline']:
+            # 真正把识别管线加载出来（paraformer + 标点恢复），
+            # 只拿到引擎对象的话，首次分析还要现加载十几秒
+            try:
+                from modules import model_registry
+
+                if model_registry.get_funasr_pipeline() is not None:
+                    _engine_ready['pipeline'] = True
+            except Exception as exc:
+                print(f'[警告] 识别管线预加载失败: {exc}')
     return True
 
 
@@ -345,8 +356,11 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
         update_progress(65, '正在分析主题...')
         topics = analyze_topic(full_text)
 
-        update_progress(75, '正在生成会议摘要...')
-        summary = generate_summary(full_text, max_length=300)
+        update_progress(75, '正在生成会议摘要（CPU 推理，约需 20~40 秒）...')
+        # 关键词与主题直接复用上面算好的结果：摘要内部也要用它们，
+        # 不传的话会再算一遍（主题分析要跑句向量模型，重复一次多花 1~3 秒）
+        summary = generate_summary(full_text, max_length=300,
+                                   keywords=keywords, topics=topics)
 
         update_progress(80, '正在提取待办事项与决议...')
         action_items = extract_action_items(full_text)
@@ -1307,12 +1321,19 @@ def preload_models_async():
     模型加载需要十几秒到几十秒，旧实现放在 socketio.run 之前同步执行，
     期间端口还没监听、页面打不开，看起来像启动失败。改为后台预热，
     服务立刻可用，健康检查接口会实时反映模型就绪状态。
+
+    预热的是**每条分析都要用的那几套**：识别管线（paraformer + 标点 + VAD）
+    与句向量模型。旧实现只取了引擎对象，识别管线仍然在首次分析时才真正加载，
+    用户第一次上传要比后面多等 15~20 秒。
+    摘要大模型（Qwen2.5）不在这里预热：它占约 6GB 内存，实测加载只要几秒，
+    常驻反而会把 16GB 的机器逼进内存压缩、拖慢识别。
     """
     if not app.config.get('PRELOAD_MODELS', True):
         print('[信息] 跳过模型预加载（PRELOAD_MODELS=false）')
         return
 
     def _worker():
+        started = time.time()
         try:
             init_asr_models()
         except Exception as exc:
@@ -1325,7 +1346,7 @@ def preload_models_async():
         except Exception as exc:
             print(f'[警告] 预加载句向量模型失败: {exc}，将在首次请求时重试')
 
-        print('[启动] 模型预加载完成')
+        print(f'[启动] 模型预加载完成（耗时 {time.time() - started:.1f}s）')
 
     threading.Thread(target=_worker, daemon=True).start()
 

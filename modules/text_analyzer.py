@@ -9,6 +9,8 @@ import jieba
 import jieba.posseg as pseg
 from collections import Counter, defaultdict
 import re
+import threading
+import time
 import numpy as np
 import math
 
@@ -30,27 +32,88 @@ _qwen_model = None
 _qwen_tokenizer = None
 _QWEN_MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models', 'Qwen2.5-1.5B-Instruct')
 
-def get_qwen_model():
-    """加载并缓存Qwen2.5-1.5B-Instruct指令模型，本地没有则自动下载"""
+# 摘要模型加载锁：启动预热线程和首次请求可能同时进来，没有锁会重复加载
+# （一瞬间多吃几 GB 内存，在 16GB 机器上足够把系统逼进内存压缩）。
+_qwen_lock = threading.Lock()
+
+# 摘要生成的 token 上限。
+# 最终摘要会被截断到 max_length（默认 300 字符，约 200~220 token），
+# 多生成的 token 只会被丢掉 —— 而 CPU 上解码是最慢的一环（实测约 5 token/s，
+# 白多生成 100 token 就要多等 20 秒）。
+QWEN_MAX_NEW_TOKENS = 220
+
+# 摘要模型的加载精度。
+# 模型权重在磁盘上存的是 bfloat16，torch_dtype='auto' 会照抄成 bf16。
+# 实测（i7-14650HX + torch 2.12 CPU）：本机 torch 的 bf16 矩阵乘走的是标量实现，
+# 1536×1536 矩阵乘 bf16 只有 1.7 GFLOP/s，而 fp32 是 269 GFLOP/s（差 158 倍）——
+# 同一段 462 token 的摘要输入，bf16 预填充 33.3s，fp32 只要 5.1s。
+# 但 fp32 要占约 6GB（bf16 只有 3GB）：16GB 内存的机器一边跑识别管线一边装 fp32
+# 会把系统逼进内存压缩（实测可用内存只剩 287MB、负载 98%），反而更慢
+# （摘要 28.6s → 35.5s）。因此默认仍用 bf16；内存宽裕（空闲 ≥8GB）或换机器时，
+# 把环境变量 SUMMARY_MODEL_DTYPE 设成 float32 可以快好几倍。
+# 动态 int8 量化试过：内存只占 1.5GB、解码 8 token/s，但输出质量明显塌掉
+# （把合规培训会议总结成「财务报告中的风险控制」），不可用。
+QWEN_LOAD_DTYPE = 'auto'
+
+
+def _qwen_dtype():
+    """摘要模型的加载精度（可用环境变量 SUMMARY_MODEL_DTYPE 覆盖）。"""
+    try:
+        from config import Config
+
+        value = (getattr(Config, 'SUMMARY_MODEL_DTYPE', None) or QWEN_LOAD_DTYPE)
+    except Exception:
+        value = QWEN_LOAD_DTYPE
+    value = str(value).strip().lower()
+    if value in ('', 'auto', 'bf16', 'bfloat16', 'none'):
+        return 'auto'
+    import torch
+
+    mapping = {
+        'float32': torch.float32, 'fp32': torch.float32, '32': torch.float32,
+        'float16': torch.float16, 'fp16': torch.float16, 'half': torch.float16,
+    }
+    return mapping.get(value, 'auto')
+
+
+def _load_qwen():
+    """真正执行加载（调用前需持有 _qwen_lock）。"""
     global _qwen_model, _qwen_tokenizer
-    if _qwen_model is not None:
-        return _qwen_model, _qwen_tokenizer
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    dtype = _qwen_dtype()
+
+    def _from_pretrained(path, local_only):
+        """transformers 5.x 用 dtype=，老版本用 torch_dtype=，两个都试。"""
+        import torch
+
+        common = dict(local_files_only=local_only)
+        if dtype != 'auto':
+            try:
+                return AutoModelForCausalLM.from_pretrained(path, dtype=dtype, **common)
+            except TypeError:
+                return AutoModelForCausalLM.from_pretrained(
+                    path, torch_dtype=dtype, **common)
+        try:
+            return AutoModelForCausalLM.from_pretrained(path, dtype=dtype, **common)
+        except TypeError:
+            return AutoModelForCausalLM.from_pretrained(
+                path, torch_dtype=dtype, **common)
 
     # 优先从本地加载
     if os.path.exists(_QWEN_MODEL_PATH):
         try:
-            print("[摘要模型] 从本地加载Qwen2.5-1.5B-Instruct...")
+            print(f'[摘要模型] 从本地加载Qwen2.5-1.5B-Instruct（{dtype}）...')
+            started = time.time()
             _qwen_tokenizer = AutoTokenizer.from_pretrained(_QWEN_MODEL_PATH, local_files_only=True)
-            _qwen_model = AutoModelForCausalLM.from_pretrained(
-                _QWEN_MODEL_PATH,
-                torch_dtype='auto',
-                device_map='cpu',
-                local_files_only=True
-            )
+            # 不用 device_map='cpu'：那会挂上 accelerate 的 offload 钩子，
+            # 每次前向都多一层 Python 开销（实测解码慢约 5%），纯 CPU 不需要它。
+            _qwen_model = _from_pretrained(_QWEN_MODEL_PATH, True)
             _qwen_model.eval()
-            print(f"[摘要模型] Qwen2.5加载完成 ({sum(p.numel() for p in _qwen_model.parameters())/1e6:.0f}M参数)")
+            print(f"[摘要模型] Qwen2.5加载完成 "
+                  f"({sum(p.numel() for p in _qwen_model.parameters())/1e6:.0f}M参数，"
+                  f"耗时 {time.time() - started:.1f}s)")
             return _qwen_model, _qwen_tokenizer
         except Exception as e:
             print(f"[摘要模型] 本地加载失败: {e}")
@@ -60,11 +123,7 @@ def get_qwen_model():
         print("[摘要模型] 本地未找到Qwen2.5，正在从HuggingFace下载（约3GB，首次需较长时间）...")
         model_id = 'Qwen/Qwen2.5-1.5B-Instruct'
         _qwen_tokenizer = AutoTokenizer.from_pretrained(model_id)
-        _qwen_model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype='auto',
-            device_map='cpu'
-        )
+        _qwen_model = _from_pretrained(model_id, False)
         _qwen_model.eval()
         print(f"[摘要模型] Qwen2.5下载并加载完成 ({sum(p.numel() for p in _qwen_model.parameters())/1e6:.0f}M参数)")
         return _qwen_model, _qwen_tokenizer
@@ -73,6 +132,17 @@ def get_qwen_model():
         _qwen_model = None
         _qwen_tokenizer = None
         return None, None
+
+
+def get_qwen_model():
+    """加载并缓存Qwen2.5-1.5B-Instruct指令模型（幂等，线程安全）。"""
+    global _qwen_model, _qwen_tokenizer
+    if _qwen_model is not None:
+        return _qwen_model, _qwen_tokenizer
+    with _qwen_lock:
+        if _qwen_model is not None:
+            return _qwen_model, _qwen_tokenizer
+        return _load_qwen()
 
 
 def _qwen_summarize(text, max_length=300):
@@ -91,12 +161,16 @@ def _qwen_summarize(text, max_length=300):
             {"role": "user", "content": user_prompt}
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(prompt, return_tensors='pt', truncation=True, max_length=2048).to(model.device)
+        inputs = tokenizer(prompt, return_tensors='pt', truncation=True, max_length=2048)
+        inputs = {key: value.to(model.device) for key, value in inputs.items()}
 
-        with torch.no_grad():
+        max_new_tokens = min(int(max_length), QWEN_MAX_NEW_TOKENS)
+
+        # inference_mode 比 no_grad 再省一点算子簿记开销
+        with torch.inference_mode():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=max_length,
+                max_new_tokens=max_new_tokens,
                 # 贪心解码：本机是 CPU 推理，旧参数 num_beams=3 + do_sample=True
                 # 相当于一次生成跑 3 遍束搜索还要采样，长会议摘要要等好几分钟；
                 # 贪心解码对会议摘要这类「忠实复述」任务质量几乎无损，速度提升约 3 倍。
@@ -1033,7 +1107,14 @@ def _extract_core_points(sentences, keywords_set, max_points=3):
     return result
 
 
-def _coverage_digest(text, sentences, limit=3000):
+# 摘要大模型的输入长度上限（字符）。
+# 摘要最终只保留 300 字，输入再长也只是被抽样；而 CPU 上预填充慢得离谱
+# （bf16 实测约 20ms/token，1600 字≈600 token≈12s；3000 字≈1100 token≈22s+），
+# 所以长会议按 1600 字抽样即可覆盖全场，短会议（转写不足 1600 字）不受影响。
+COVERAGE_DIGEST_LIMIT = 1600
+
+
+def _coverage_digest(text, sentences, limit=None):
     """
     为摘要大模型准备「覆盖全文」的输入。
 
@@ -1041,6 +1122,7 @@ def _coverage_digest(text, sentences, limit=3000):
     后面的讨论、决议全部看不到。这里改为按时间轴均匀抽样句子，
     让开头、中间、结尾都有代表句进入模型，再按长度截断。
     """
+    limit = limit or COVERAGE_DIGEST_LIMIT
     if len(text) <= limit:
         return text
 
@@ -1070,14 +1152,19 @@ def text_models_enabled():
         return True
 
 
-def generate_summary(text, max_length=500, language='zh', use_model=None):
+def generate_summary(text, max_length=500, language='zh', use_model=None,
+                     keywords=None, topics=None):
     """
-    生成会议摘要：优先使用mT5大模型，降级使用TextRank
+    生成会议摘要：优先使用大模型（Qwen2.5 → mT5），降级使用 TextRank
     策略：
     1. 先用TextRank提取关键句（确保内容准确）
-    2. 尝试用mT5大模型生成精炼摘要
+    2. 尝试用大模型生成精炼摘要
     3. 如果大模型产生幻觉或失败，降级使用TextRank结果
     4. 第三人称转换 + 结构化输出
+
+    keywords / topics 可传入调用方已经算好的结果：关键词与主题在分析流水线里
+    本来就要算一遍，这里再算一次纯属重复（主题分析要跑句向量模型和输出，
+    重复算一次实测多花 1~3 秒）。
     """
     print(f'=== generate_summary called === text length: {len(text)}')
     if not text or len(text.strip()) < 20:
@@ -1092,7 +1179,8 @@ def generate_summary(text, max_length=500, language='zh', use_model=None):
         return clean_text[:max_length]
 
     # ====== 第一步：TextRank提取关键句（保底方案）======
-    keywords = extract_keywords(text, top_n=10, language=language)
+    if keywords is None:
+        keywords = extract_keywords(text, top_n=10, language=language)
     keyword_set = {kw['word'] for kw in keywords} if keywords else set()
 
     key_sents = extract_key_sentences_from_list(sentences, top_n=min(15, len(sentences)))
@@ -1155,7 +1243,8 @@ def generate_summary(text, max_length=500, language='zh', use_model=None):
                 print(f'[摘要模型] mT5生成成功')
 
     # ====== 第三步：组装最终摘要 ======
-    topics = analyze_topic(text, language=language)
+    if topics is None:
+        topics = analyze_topic(text, language=language)
 
     if model_summary:
         # 大模型生成摘要成功：直接使用大模型结果，不再加额外开头
