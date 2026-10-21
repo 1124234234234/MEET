@@ -253,6 +253,28 @@ def create_meeting():
     return jsonify({'code': 200, 'message': '分析已开始', 'meeting_id': meeting.id})
 
 
+def _persist_meeting_documents(meeting_id, compliance=None):
+    """
+    按会议当前已有的数据写三份文档。
+
+    必须在 app_context 内调用。识别失败 / 全程静音也要调用：minutes_writer
+    会把「未识别到有效语音内容」写进纪要，保证每段音频都有对应的文档，
+    而不是只在分析成功时才有。
+    """
+    from modules import minutes_writer
+
+    meeting = Meeting.query.get(meeting_id)
+    if not meeting:
+        return None
+    segments = [t.to_dict() for t in
+                Transcription.query.filter_by(meeting_id=meeting_id)
+                .order_by(Transcription.start_time).all()]
+    stored = minutes_writer.write_documents(meeting, segments, compliance=compliance)
+    meeting.documents_dir = stored['directory']
+    db.session.commit()
+    return stored
+
+
 def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_compliance):
     """
     异步处理会议分析（上传音频路径）。
@@ -313,7 +335,38 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
               f'{len(result["segments"])} 句，耗时 {_time.time()-started:.1f}s')
 
         if not full_text.strip():
-            raise RuntimeError('未识别到有效语音内容')
+            # 静音 / 纯音乐 / 噪声也要留下一份纪要：写清楚「未识别到有效语音」，
+            # 不能因为识别结果为空就让这场会议没有任何文档
+            print(f'Meeting {meeting_id}: 未识别到有效语音，生成占位纪要')
+            duration = 0
+            try:
+                from modules.audio_io import get_duration
+
+                duration = int(get_duration(analysis_audio))
+            except Exception as exc:
+                print(f'Meeting {meeting_id}: 读取音频时长失败: {exc}')
+            with app.app_context():
+                meeting = Meeting.query.get(meeting_id)
+                if meeting:
+                    meeting.duration = duration
+                    meeting.summary = ('未识别到有效语音内容（音频可能为静音、纯音乐或噪声），'
+                                       '无法生成会议摘要。')
+                    meeting.keywords = '[]'
+                    meeting.topics = '[]'
+                    meeting.action_items = '[]'
+                    meeting.decisions = '[]'
+                    meeting.sentiment = json.dumps(
+                        {'sentiment': 'neutral', 'score': 0}, ensure_ascii=False)
+                    meeting.status = 'finished'
+                    db.session.commit()
+                    try:
+                        stored = _persist_meeting_documents(meeting_id)
+                        print(f'Meeting {meeting_id}: 占位纪要已生成 -> {stored["directory"]}')
+                    except Exception as exc:
+                        db.session.rollback()
+                        print(f'Meeting {meeting_id}: 生成占位纪要失败: {exc}')
+            update_progress(100, '分析完成（未识别到有效语音，已生成纪要）')
+            return
 
         update_progress(40, '正在进行说话人分离...')
         speaker_segments = []
@@ -484,7 +537,17 @@ def _process_meeting_async(meeting_id, audio_path, enable_diarization, enable_co
             meeting = Meeting.query.get(meeting_id)
             if meeting:
                 meeting.status = 'failed'
+                if not (meeting.summary or '').strip():
+                    meeting.summary = '分析未能完成，未生成会议摘要。'
                 db.session.commit()
+                # 分析失败也要留下文档：至少能说明这段音频没被成功处理，
+                # 用户点「查看」时不会看到「没有文档」
+                try:
+                    stored = _persist_meeting_documents(meeting_id)
+                    print(f'Meeting {meeting_id}: 失败纪要已生成 -> {stored["directory"]}')
+                except Exception as doc_exc:
+                    db.session.rollback()
+                    print(f'Meeting {meeting_id}: 生成失败纪要失败: {doc_exc}')
 
 
 @app.route('/api/meetings/<int:meeting_id>/progress')
@@ -625,23 +688,22 @@ def update_meeting(meeting_id):
             segments = [t.to_dict() for t in
                         Transcription.query.filter_by(meeting_id=meeting_id)
                         .order_by(Transcription.start_time).all()]
-            if segments or (meeting.summary or '').strip():
-                report = ComplianceReport.query.filter_by(meeting_id=meeting_id).first()
-                compliance = None
-                if report:
-                    raw = report.to_dict()
-                    compliance = {
-                        'total_score': raw.get('total_score', 0),
-                        'score_level': raw.get('score_level', ''),
-                        'components': raw.get('detailed_scores') or {},
-                        'missing_points': raw.get('missing_points') or [],
-                        'risk_keywords': raw.get('risk_keywords') or [],
-                        'risk_time_markers': raw.get('risk_time_markers') or [],
-                        'suggestions': raw.get('suggestions') or [],
-                    }
-                stored = minutes_writer.write_documents(meeting, segments, compliance=compliance)
-                meeting.documents_dir = stored['directory']
-                db.session.commit()
+            report = ComplianceReport.query.filter_by(meeting_id=meeting_id).first()
+            compliance = None
+            if report:
+                raw = report.to_dict()
+                compliance = {
+                    'total_score': raw.get('total_score', 0),
+                    'score_level': raw.get('score_level', ''),
+                    'components': raw.get('detailed_scores') or {},
+                    'missing_points': raw.get('missing_points') or [],
+                    'risk_keywords': raw.get('risk_keywords') or [],
+                    'risk_time_markers': raw.get('risk_time_markers') or [],
+                    'suggestions': raw.get('suggestions') or [],
+                }
+            stored = minutes_writer.write_documents(meeting, segments, compliance=compliance)
+            meeting.documents_dir = stored['directory']
+            db.session.commit()
         except Exception as exc:
             db.session.rollback()
             print(f'[文档] 更新会议信息后刷新文档失败: {exc}')
@@ -1071,8 +1133,6 @@ def _meeting_documents(meeting_id, regenerate=False, distill=False):
     segments = [t.to_dict() for t in
                 Transcription.query.filter_by(meeting_id=meeting_id)
                 .order_by(Transcription.start_time).all()]
-    if not segments and not (meeting.summary or '').strip():
-        return {'code': 404, 'message': '该会议还没有转写内容，无法生成文档'}
 
     report = ComplianceReport.query.filter_by(meeting_id=meeting_id).first()
     compliance = None
@@ -1264,8 +1324,6 @@ def list_meeting_documents():
         segments = [t.to_dict() for t in
                     Transcription.query.filter_by(meeting_id=meeting.id)
                     .order_by(Transcription.start_time).all()]
-        if not segments and not (meeting.summary or '').strip():
-            continue
         described = minutes_writer.describe_documents(meeting)
         if include_missing and any(not item['exists'] for item in described['files']):
             try:

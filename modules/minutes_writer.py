@@ -179,7 +179,7 @@ def build_summary_document(meeting, transcriptions, compliance=None):
     if created_text:
         lines.append(f'| 会议时间 | {created_text} |')
     lines.append(f'| 会议时长 | {format_duration(duration)} |')
-    lines.append(f'| 参会人员 | {len(speakers) or 1} 人（{speaker_text or "SPEAKER_00"}） |')
+    lines.append(f'| 参会人员 | {str(len(speakers)) + " 人（" + speaker_text + "）" if speakers else "—"} |')
     lines.append(f'| 发言规模 | {len(transcriptions or [])} 句，共 {char_count} 字 |')
     if score is not None:
         lines.append(f'| 合规评分 | {float(score):.1f} 分{("（" + level + "）") if level else ""} |')
@@ -196,7 +196,11 @@ def build_summary_document(meeting, transcriptions, compliance=None):
     lines.append('')
 
     lines.append('## 一、内容摘要')
-    lines.append((getattr(meeting, 'summary', '') or '（暂无摘要）').strip())
+    summary_text = (getattr(meeting, 'summary', '') or '').strip()
+    if not summary_text:
+        summary_text = ('未识别到有效语音内容，无法生成摘要。'
+                        if not transcriptions else '（暂无摘要）')
+    lines.append(summary_text)
     lines.append('')
 
     lines.append('## 二、待办事项')
@@ -407,18 +411,26 @@ def build_minutes_document(meeting, transcriptions, compliance=None, body=None):
     lines.append(f'| 会议时间 | {created_text}（{format_duration(duration)}） |')
     lines.append(f'| 会议地点 | {getattr(meeting, "location", None) or "—"} |')
     lines.append(f'| 主 持 人 | {getattr(meeting, "host", None) or "—"} |')
-    lines.append(f'| 参会人员 | {len(speakers) or 1} 人：{"；".join(speaker_parts) or "SPEAKER_00"} |')
+    if speakers:
+        lines.append(f'| 参会人员 | {len(speakers)} 人：{"；".join(speaker_parts)} |')
+    else:
+        lines.append('| 参会人员 | — |')
     lines.append(f'| 记 录 人 | {getattr(meeting, "recorder", None) or _RECORDER_FALLBACK} |')
-    if topics:
-        lines.append(f'| 会议议题 | {"、".join(topics[:5])} |')
+    lines.append(f'| 会议议题 | {"、".join(topics[:5]) if topics else "—"} |')
     lines.append('')
 
     # ---- 一、会议摘要 ----
+    summary_text = (getattr(meeting, 'summary', '') or '').strip()
+    if not summary_text:
+        summary_text = ('未识别到有效语音内容，无法生成会议摘要。'
+                        if not transcriptions else '（摘要暂未生成，可查看讨论要点与会议记录全文）')
     lines.append('## 一、会议摘要')
-    lines.append((getattr(meeting, 'summary', '') or '（暂无摘要）').strip())
+    lines.append(summary_text)
     lines.append('')
 
     # ---- 二、讨论要点（飞书妙记式短条目）----
+    empty_note = ('本次会议未识别到有效语音内容。' if not transcriptions
+                  else '本次会议没有可用的转写内容。')
     lines.append('## 二、讨论要点')
     if body:
         bullets = []
@@ -440,14 +452,14 @@ def build_minutes_document(meeting, transcriptions, compliance=None, body=None):
         if bullets:
             lines.extend(bullets)
         else:
-            lines.append('本次会议没有可用的转写内容。')
+            lines.append(empty_note)
     else:
         points = _discussion_points(transcriptions)
         if points:
             for index, item in enumerate(points, 1):
                 lines.append(f'{index}. {item["text"]}')
         else:
-            lines.append('本次会议没有可用的转写内容。')
+            lines.append(empty_note)
     lines.append('')
 
     # ---- 三、决议事项 ----
@@ -534,7 +546,7 @@ def build_transcript_document(meeting, transcriptions):
     lines = [f'# {title} 会议记录（全文）', '']
     lines.append(f'会议名称：{title}')
     lines.append(f'时　　间：{created_text}（时长 {format_duration(duration)}）')
-    lines.append(f'出席人员：共 {len(speakers) or 1} 人（{"、".join(speakers) or "SPEAKER_00"}）')
+    lines.append(f'出席人员：{str(len(speakers)) + " 人（" + "、".join(speakers) + "）" if speakers else "—"}')
     lines.append('记录方式：FunASR paraformer-large 自动转写 + 标点恢复；'
                  '说话人由声纹聚类自动编号')
     lines.append(f'记录规模：{len(transcriptions or [])} 句，共 {char_count} 字')
@@ -548,7 +560,7 @@ def build_transcript_document(meeting, transcriptions):
         lines.append(f'[{format_clock(seg.get("start_time"))}] '
                      f'{seg.get("speaker") or "SPEAKER_00"}：{text}')
     if not transcriptions:
-        lines.append('（无转写内容）')
+        lines.append('（未识别到有效语音内容，无转写记录）')
     lines.append('')
     lines.append('---')
     lines.append(f'*全文由系统自动转写，未经人工校对；纪要见同目录《会议纪要》。*')

@@ -151,6 +151,25 @@
     （用 fp32）或换机器/加显卡，或关闭大模型摘要改用抽取式
     （ENABLE_TEXT_MODELS=false，整场分析约 5 秒，摘要是原句拼接而非改写）。
 
+1.6 任何音频都生成会议纪要（不因识别为空或分析报错而缺文档）
+
+  测试方法：两种极端音频走完整的「上传 → 后台分析 → 文档生成」链路。
+
+  样本                        结果
+  3 秒纯静音 WAV              状态 finished，时长 3 秒；摘要写明「未识别到有效语音内容」；
+                              三份文档齐全，文档接口 200
+  4KB 损坏 RIFF（无法解码）    状态 failed；摘要写明「分析未能完成」；
+                              三份文档齐全，文档接口 200
+
+  验证点：
+  - 静音样本：会议纪要含标题、会议信息表（参会人员/议题显示「—」）、
+    「本次会议未识别到有效语音内容」，文档接口返回 200 与三份文件
+  - 损坏样本：分析抛异常后仍调用文档生成，纪要保留同样的完整版式
+  - 文档列表（/api/documents）不再跳过「无转写且无摘要」的会议，
+    批量导出脚本 export_documents.py 同样不再跳过
+  - 以前的行为：识别为空直接抛「未识别到有效语音内容」，会议状态 failed，
+    没有任何文档，页面上点「查看」看不到纪要
+
 
 二、音频分析功能检验
 
@@ -237,9 +256,10 @@
   GET /api/documents（返回文档根目录供页面展示存储位置）
 - 历史会议可用 export_documents.py 批量补生成（默认只走规则层，一场几毫秒；
   --distill 才跑大模型改写）
-- 量化证据：文档测试 67/67 通过（tests/test_meeting_documents.py），含飞书版式章节、
+- 量化证据：文档测试 74/74 通过（tests/test_meeting_documents.py），含飞书版式章节、
   待办表格过滤、要素缺失兜底、文件名安全、接口 4 种格式（校验 docx/pdf 文件头）、
   填写地点/主持人后自动刷新、入库自动生成
+- 任何音频都有纪要：静音（识别为空）与损坏文件（分析报错）都会生成三份文档，页面上不会再出现「没有文档」；文档列表、文档接口、批量导出脚本都不再跳过无转写的会议
 - 隐私：records/ 已加入 .gitignore（会议文档含会议内容，不上传到公开仓库）
 
 功能3：音频降噪、回声消除与语音增强
@@ -390,7 +410,7 @@ bge-small-zh-v1.5 句向量余弦相似度；与关键词命中（权重 10 分�
   tests/test_voice_pipeline.py       53/53 通过
   tests/test_realtime_accuracy.py     6/6  通过
   tests/test_speaker_recognition.py  17/17 通过
-  tests/test_meeting_documents.py    67/67 通过
+  tests/test_meeting_documents.py    74/74 通过
   tests/test_realtime_http.py        24/24 通过
   tests/test_realtime.py             17/17 通过
   tests/test_audio_preprocessor.py    7/7  通过

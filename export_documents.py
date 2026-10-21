@@ -106,10 +106,6 @@ def main():
             segments = [t.to_dict() for t in
                         Transcription.query.filter_by(meeting_id=meeting.id)
                         .order_by(Transcription.start_time).all()]
-            if not segments and not (meeting.summary or '').strip():
-                print(f'  [跳过] 会议 {meeting.id}《{meeting.title}》没有转写内容')
-                skipped += 1
-                continue
             try:
                 body = minutes_body_for(meeting, segments, distill=distill)
                 stored = minutes_writer.write_documents(

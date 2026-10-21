@@ -116,6 +116,69 @@ def test_distilled_body_in_minutes():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_empty_audio_still_has_minutes():
+    """静音 / 无有效语音也要生成纪要：三份文件齐全，并写明原因。"""
+    print('\n[1d] 无有效语音也生成纪要')
+    from modules import minutes_writer
+
+    root = tempfile.mkdtemp(prefix='records_empty_')
+    try:
+        meeting = FakeMeeting(id=77, title='静音测试会议', duration=3, summary='',
+                              keywords=[], topics=[], action_items=[], decisions=[])
+        stored = minutes_writer.write_documents(meeting, [], body=None, root=root)
+        names = [os.path.basename(stored['minutes']), os.path.basename(stored['summary']),
+                 os.path.basename(stored['transcript'])]
+        record('无转写也生成三份文件', all(os.path.exists(p) for p in stored.values()
+                                          if isinstance(p, str) and p.endswith('.md')), names)
+        minutes = open(stored['minutes'], encoding='utf-8-sig').read()
+        record('纪要写明未识别到有效语音', '未识别到有效语音内容' in minutes)
+        record('参会人员为空时显示「—」', '| 参会人员 | — |' in minutes)
+        record('会议信息表仍然完整', '| 会议时间 |' in minutes and '| 会议议题 | — |' in minutes)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_empty_meeting_documents_api():
+    """没有转写/摘要的会议：文档接口不能 404，列表里也要能看到它。"""
+    print('\n[1e] 无内容会议的文档接口')
+    from app import app
+    from database import db
+    from models import Meeting
+
+    with app.app_context():
+        meeting = Meeting(title='无内容会议测试', date=datetime.now(),
+                          status='failed', duration=0, summary='')
+        db.session.add(meeting)
+        db.session.commit()
+        meeting_id = meeting.id
+
+    directory = None
+    try:
+        client = app.test_client()
+        response = client.get(f'/api/meetings/{meeting_id}/documents')
+        payload = response.get_json() or {}
+        data = payload.get('data') or {}
+        record('无内容会议文档接口 -> 200', response.status_code == 200)
+        record('无内容会议也返回三份文件',
+               all(item.get('exists') for item in data.get('files') or []))
+
+        listing = client.get('/api/documents').get_json() or {}
+        months = (listing.get('data') or {}).get('months') or []
+        ids = [item.get('meeting_id') for month in months for item in month.get('meetings', [])]
+        record('无内容会议出现在文档列表', meeting_id in ids)
+
+        with app.app_context():
+            directory = Meeting.query.get(meeting_id).documents_dir
+    finally:
+        with app.app_context():
+            meeting = Meeting.query.get(meeting_id)
+            if meeting:
+                db.session.delete(meeting)
+                db.session.commit()
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+
+
 def test_basic_generation():
     """三份文件生成、目录结构、公文格式章节完整性。"""
     print('\n[1] 基本生成与目录结构（会议纪要按公文格式）')
@@ -502,6 +565,7 @@ def main():
     print('会议文档生成测试')
     print('=' * 68)
     for func in (test_page_document_wiring, test_distilled_body_in_minutes,
+                 test_empty_audio_still_has_minutes, test_empty_meeting_documents_api,
                  test_basic_generation,
                  test_missing_public_fields, test_filename_safety,
                  test_describe_and_regenerate, test_api_endpoints, test_export_formats,
