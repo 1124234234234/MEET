@@ -482,11 +482,27 @@ def test_save_meeting_writes_documents():
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_page_document_wiring():
+    """页面脚本里文档 UI 用到的常量/函数必须真的存在。
+
+    线上出过一次：DOC_KIND_LABEL 只被引用、忘了声明，点「查看」与「会议文档」
+    都报 is not defined。后端测试覆盖不到 JS，这里用静态检查兜住。
+    """
+    print('\n[0] 页面脚本的文档常量与入口')
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    source = open(os.path.join(root, 'templates', 'index.html'), encoding='utf-8').read()
+    for name in ('DOC_KIND_LABEL', 'DOC_KIND_INFO', 'DOC_FORMATS'):
+        record(f'页面声明 {name}', f'const {name}' in source)
+    for func in ('docRow', 'openDownloadDialog', 'openDocPreview', 'renderMarkdown'):
+        record(f'页面定义 {func}', f'function {func}(' in source)
+
+
 def main():
     print('=' * 68)
     print('会议文档生成测试')
     print('=' * 68)
-    for func in (test_distilled_body_in_minutes, test_basic_generation,
+    for func in (test_page_document_wiring, test_distilled_body_in_minutes,
+                 test_basic_generation,
                  test_missing_public_fields, test_filename_safety,
                  test_describe_and_regenerate, test_api_endpoints, test_export_formats,
                  test_update_public_fields, test_save_meeting_writes_documents):

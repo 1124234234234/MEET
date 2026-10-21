@@ -651,7 +651,8 @@
                    <button class="btn btn-primary" style="padding:4px 12px; font-size:12px;"
                         onclick="openDownloadDialog(${meetingId}, '${kind}')">下载</button>`
                 : `<span style="color:#bbb; font-size:12px;">未生成</span>`;
-            const sizeText = exists ? ` · ${Math.max(1, Math.round((size || 0) / 1024))} KB` : '';
+            const sizeText = exists && size
+                ? ` · ${Math.max(1, Math.round(size / 1024))} KB` : '';
             return `<div class="doc-row">
                 <span class="doc-icon">${info.icon}</span>
                 <div class="doc-meta">
@@ -663,6 +664,11 @@
         }
 
         // 文档类型说明（详情页与文档页共用）
+        const DOC_KIND_LABEL = {
+            minutes: '会议纪要',
+            summary: '会议记录概要',
+            transcript: '会议记录全文'
+        };
         const DOC_KIND_INFO = {
             minutes: {icon: '📝', desc: '摘要 · 讨论要点 · 决议 · 待办 · 合规提示'},
             summary: {icon: '📋', desc: '一页速览：时间 / 参会人 / 评分 / 待办'},

@@ -237,7 +237,7 @@
   GET /api/documents（返回文档根目录供页面展示存储位置）
 - 历史会议可用 export_documents.py 批量补生成（默认只走规则层，一场几毫秒；
   --distill 才跑大模型改写）
-- 量化证据：文档测试 60/60 通过（tests/test_meeting_documents.py），含飞书版式章节、
+- 量化证据：文档测试 67/67 通过（tests/test_meeting_documents.py），含飞书版式章节、
   待办表格过滤、要素缺失兜底、文件名安全、接口 4 种格式（校验 docx/pdf 文件头）、
   填写地点/主持人后自动刷新、入库自动生成
 - 隐私：records/ 已加入 .gitignore（会议文档含会议内容，不上传到公开仓库）
@@ -390,7 +390,7 @@ bge-small-zh-v1.5 句向量余弦相似度；与关键词命中（权重 10 分�
   tests/test_voice_pipeline.py       53/53 通过
   tests/test_realtime_accuracy.py     6/6  通过
   tests/test_speaker_recognition.py  17/17 通过
-  tests/test_meeting_documents.py    60/60 通过
+  tests/test_meeting_documents.py    67/67 通过
   tests/test_realtime_http.py        24/24 通过
   tests/test_realtime.py             17/17 通过
   tests/test_audio_preprocessor.py    7/7  通过
@@ -503,6 +503,9 @@ bge-small-zh-v1.5 句向量余弦相似度；与关键词命中（权重 10 分�
  43. **讨论要点里混进提问与关键词罗列**：「……压力测试结果怎么样」「有没有完成」
      和「涉及的关键内容：完成、自动、版本…」都进了纪要。现剔除疑问句，删除关键词
      罗列条目（会议议题里已有）；同时把口语数字写成书面形式（65%、1.2 秒、V2.0）
+ 44. **点「查看」和「会议文档」报 DOC_KIND_LABEL is not defined**：页面重写时
+     常量只被引用、忘了声明，会议详情弹窗因此整段渲染中断（弹窗不出现）。现补上
+     声明，并加静态检查卡住「页面引用但未声明」的文档常量（文档测试 67 项）
 
 备注：视频/图像识别（参会人数视频统计、拍照签到、活体检测）不属于语音侧范围，
       本报告未做检验。
