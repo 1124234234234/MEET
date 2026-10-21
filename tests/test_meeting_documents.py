@@ -82,33 +82,36 @@ def test_distilled_body_in_minutes():
     from modules import minutes_writer
     from modules.text_analyzer import distill_minutes
 
-    # 1) 规则归纳（不依赖大模型）：口语要压缩、人称要转成「本方/对方」、带引导语
+    # 1) 规则归纳（不依赖大模型）：口语要压缩、人称要转成「我方/对方」、带引导语
     spoken = ('唉，李总你好，我是中国人寿的小王。现在之前王总啊给我推荐联系您啊，'
               '他之前在我这边配置了那个全家医疗险和重疾险，觉得咱们这个方案还是比较实在的。'
               '我也想跟您简单对接一下，给您做一份免费的家庭保单体检，给咱们保障啊。')
     body = distill_minutes(spoken, use_model=False)
-    record('规则归纳出条目', bool(body) and len(body) >= 2, f'{len(body or [])} 条')
+    record('规则归纳出要点', bool(body) and len(body) >= 2, f'{len(body or [])} 条')
     joined = '\n'.join(body or [])
-    record('条目带公文引导语', any(lead in joined for lead in
-                                ('会议听取了', '会议认为', '会议指出', '会议强调', '会议明确')))
-    record('口语人称已规范化（本方/对方）', '本方' in joined or '对方' in joined)
+    record('要点不含公文套话（不再「会议认为，<原句>」）',
+           '会议听取了' not in joined and '会议认为' not in joined)
+    record('口语人称已规范化（我方/对方）', '我方' in joined or '对方' in joined)
+    record('人称替换没有叠字（我方方/本方）', '我方方' not in joined and '本方' not in joined)
     record('寒暄被剔除（不含「李总你好」）', '你好' not in joined)
-    record('条目带编号', (body or [''])[0].strip().startswith('1.'))
 
-    # 2) 正文写进纪要：二、章节用归纳好的条目，不再罗列逐字发言
+    # 2) 要点写进纪要：二、讨论要点用编号条目，不再罗列逐字发言
     root = tempfile.mkdtemp(prefix='records_test_')
     try:
         meeting = FakeMeeting(id=31)
         stored = minutes_writer.write_documents(meeting, SEGMENTS, body=body, root=root)
         minutes = open(stored['minutes'], encoding='utf-8-sig').read()
-        record('纪要正文采用归纳条目', (body or [''])[0] in minutes)
+        discussion = minutes.split('## 二、讨论要点')[1].split('## 三、')[0]
+        record('纪要正文采用归纳要点', bool(body) and body[0] in discussion)
+        record('要点在纪要里按条编号', '1. ' in discussion)
         record('纪要正文不再照抄逐字发言（无（一）SPEAKER_00 段落）',
                '（一）SPEAKER_00' not in minutes)
 
-        # 3) 没有归纳结果时退回按发言人列要点（老记录仍可用）
+        # 3) 没有归纳结果时退回逐句列要点（老记录仍可用）
         legacy = minutes_writer.write_documents(meeting, SEGMENTS, root=root)
         legacy_minutes = open(legacy['minutes'], encoding='utf-8-sig').read()
-        record('无归纳结果时退回按发言人列要点', '（一）SPEAKER_00' in legacy_minutes)
+        record('无归纳结果时退回逐句要点',
+               SEGMENTS[0]['text'] in legacy_minutes)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -121,7 +124,10 @@ def test_basic_generation():
     root = tempfile.mkdtemp(prefix='records_test_')
     try:
         meeting = FakeMeeting(location='三楼会议室', host='张三', recorder='李四')
-        stored = minutes_writer.write_documents(meeting, SEGMENTS, compliance=COMPLIANCE, root=root)
+        body = ['召开第四季度产品销售合规会议', '客户投诉集中在收益表述问题',
+                '要求重新梳理销售话术并加强合规培训']
+        stored = minutes_writer.write_documents(meeting, SEGMENTS, compliance=COMPLIANCE,
+                                               body=body, root=root)
 
         relative = os.path.relpath(stored['directory'], root)
         expected_dir = os.path.join('2026-10', '2026-10-12_合规培训会议_1')
@@ -136,35 +142,35 @@ def test_basic_generation():
         record('会议记录概要.md 已生成', os.path.exists(stored['summary']))
         record('会议记录全文.md 已生成', os.path.exists(stored['transcript']))
 
-        # 公文格式：标题 + 会议组织情况 + 分条正文 + 落款
+        # 版式参考飞书妙记：标题 + 会议信息表格 + 摘要 + 讨论要点 + 决议 + 待办表格 + 合规 + 落款
         required = [
-            '# 合规培训会议 会议纪要',
-            '会议名称：合规培训会议',
-            '时　　间：2026年10月12日 15时30分',
-            '地　　点：三楼会议室',
-            '主 持 人：张三',
-            '出席人员：共 2 人',
-            '列席人员：—',
-            '缺席人员：—',
-            '记 录 人：李四',
-            '会议议题：',
-            '## 一、会议概况',
-            '## 二、会议听取了下列发言',
-            '## 三、会议决定',
-            '## 四、会议要求',
+            '# 合规培训会议 · 会议纪要',
+            '| 会议时间 |',
+            '| 会议地点 | 三楼会议室 |',
+            '| 主 持 人 | 张三 |',
+            '| 参会人员 | 2 人',
+            '| 记 录 人 | 李四 |',
+            '| 会议议题 |',
+            '## 一、会议摘要',
+            '## 二、讨论要点',
+            '## 三、决议事项',
+            '## 四、待办事项',
             '## 五、合规与风险提示',
+            '| 事项 | 负责人 | 时间 |',
             '记录整理：',
             '成文日期：2026年10月12日',
         ]
         missing = [item for item in required if item not in minutes]
-        record('纪要符合公文格式（标题/组织情况/正文分条/落款）', not missing,
+        record('纪要版式齐全（信息表/摘要/讨论要点/决议/待办表/合规/落款）', not missing,
                f'缺少 {missing}' if missing else f'{len(required)} 项齐全')
 
         record('纪要不含逐字全文（全文另存）',
                '[00:00] SPEAKER_00：' not in minutes)
-        record('纪要按发言人是分条整理发言要点',
-               '（一）SPEAKER_00' in minutes and '（二）SPEAKER_01' in minutes)
-        record('纪要含决议（会议决定）与待办（会议要求）',
+        discussion = minutes.split('## 二、讨论要点')[1].split('## 三、')[0]
+        record('讨论要点按条编号、不复述逐字发言',
+               '1. 召开第四季度产品销售合规会议' in discussion
+               and '各位同事，今天召开产品销售合规会议' not in discussion)
+        record('纪要含决议与待办',
                '加强销售过程录音录像管理' in minutes and '下周组织全员合规培训' in minutes)
         record('纪要含合规评分、遗漏要点与风险时间点',
                '62.6' in minutes and '投资者风险测评' in minutes
@@ -191,7 +197,7 @@ def test_basic_generation():
 
 
 def test_missing_public_fields():
-    """没有填写地点/主持人/记录人时，纪要仍合规（显示「（待补充）」与系统署名）。"""
+    """没有填写地点/主持人时用「—」，记录人默认由系统署名。"""
     print('\n[1b] 公文要素缺失时的兜底')
     from modules import minutes_writer
 
@@ -200,10 +206,10 @@ def test_missing_public_fields():
         meeting = FakeMeeting()
         stored = minutes_writer.write_documents(meeting, SEGMENTS, root=root)
         minutes = open(stored['minutes'], encoding='utf-8-sig').read()
-        record('地点未填写时显示（待补充）', '地　　点：（待补充）' in minutes)
-        record('主持人未填写时显示（待补充）', '主 持 人：（待补充）' in minutes)
+        record('地点未填写时显示「—」', '| 会议地点 | — |' in minutes)
+        record('主持人未填写时显示「—」', '| 主 持 人 | — |' in minutes)
         record('记录人默认由系统署名',
-               '记 录 人：会议室智能合规分析系统' in minutes)
+               '会议室智能合规分析系统' in minutes.split('| 记 录 人 |')[1].split('|')[0])
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -266,7 +272,7 @@ def test_describe_and_regenerate():
         minutes_writer.write_documents(meeting, SEGMENTS, root=root)
         content = open(described['files'][0]['path'], encoding='utf-8-sig').read()
         record('重新生成会覆盖为最新分析结果',
-               '更新后的摘要内容' in content and '地　　点：第一会议室' in content)
+               '更新后的摘要内容' in content and '| 会议地点 | 第一会议室 |' in content)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -369,14 +375,71 @@ def test_update_public_fields():
         path = os.path.join(meeting.documents_dir, minutes_writer.MINUTES_NAME)
         content = open(path, encoding='utf-8-sig').read()
         record('地点/主持人/记录人已写入纪要',
-               '地　　点：总部 12 楼会议室' in content and '主 持 人：王经理' in content
-               and '记 录 人：行政部' in content)
+               '| 会议地点 | 总部 12 楼会议室 |' in content and '| 主 持 人 | 王经理 |' in content
+               and '| 记 录 人 | 行政部 |' in content)
 
         Transcription.query.filter_by(meeting_id=meeting_id).delete()
         db.session.delete(meeting)
         db.session.commit()
         delete_meeting_files(type('M', (), {'audio_path': None})())
     shutil.rmtree(root, ignore_errors=True)
+
+
+def test_export_formats():
+    """下载接口支持 md / txt / docx / pdf 四种格式，且转换文件落在会议目录里。"""
+    print('\n[4c] 下载格式（md / txt / docx / pdf）')
+    from app import app
+    from models import Meeting, Transcription
+
+    with app.app_context():
+        meeting = (Meeting.query.join(Transcription, Transcription.meeting_id == Meeting.id)
+                   .order_by(Meeting.id.desc()).first())
+    if not meeting:
+        record('导出格式用例', False, '数据库里没有带转写的会议')
+        return
+    meeting_id = meeting.id
+
+    client = app.test_client()
+    checks = {
+        'md': ('text/markdown', b'#'),
+        'txt': ('text/plain', None),
+        'docx': ('application/vnd.openxmlformats-officedocument.wordprocessingml.document', b'PK'),
+        'pdf': ('application/pdf', b'%PDF'),
+    }
+    for fmt, (content_type, magic) in checks.items():
+        response = client.get(f'/api/meetings/{meeting_id}/documents/minutes?format={fmt}')
+        body = response.data
+        ok = (response.status_code == 200 and len(body) > 500
+              and content_type in (response.headers.get('Content-Type') or ''))
+        if magic:
+            # .md 带 UTF-8 BOM，比对时先去掉
+            ok = ok and body.lstrip(b'\xef\xbb\xbf').startswith(magic)
+        record(f'format={fmt} -> {response.status_code}，{len(body)} 字节', ok,
+               (response.headers.get('Content-Type') or '')[:60])
+
+    # 转换产物应保存在会议目录（与 .md 同名不同扩展名）
+    with app.app_context():
+        meeting = Meeting.query.get(meeting_id)
+        directory = meeting.documents_dir or ''
+    found = [name for name in ('会议纪要.docx', '会议纪要.pdf', '会议纪要.txt')
+             if directory and os.path.exists(os.path.join(directory, name))]
+    record(f'转出的文件落在会议目录：{found}', len(found) == 3, directory[-40:])
+
+    # 有序列表的编号按章节从 1 开始（旧实现用「已有缩进行数」当序号，会跨章节累加）
+    from modules.document_export import to_plain_text
+    sample = '## 一、甲\n1. 甲一\n2. 甲二\n\n## 二、乙\n1. 乙一\n2. 乙二\n'
+    plain = to_plain_text(sample)
+    record('纯文本导出：编号按章节从 1 开始',
+           '  1. 甲一' in plain and '  1. 乙一' in plain and '  3. 乙一' not in plain)
+
+    response = client.get(f'/api/meetings/{meeting_id}/documents/minutes?format=xlsx')
+    record('不支持的格式 -> 400', response.status_code == 400)
+
+    response = client.get(f'/api/meetings/{meeting_id}/documents')
+    payload = response.get_json() or {}
+    formats = ((payload.get('data') or {}).get('formats') or [])
+    record(f'接口返回可用格式 {[item.get("format") for item in formats]}',
+           {item.get('format') for item in formats} == {'md', 'txt', 'docx', 'pdf'})
 
 
 def test_save_meeting_writes_documents():
@@ -425,8 +488,8 @@ def main():
     print('=' * 68)
     for func in (test_distilled_body_in_minutes, test_basic_generation,
                  test_missing_public_fields, test_filename_safety,
-                 test_describe_and_regenerate, test_api_endpoints, test_update_public_fields,
-                 test_save_meeting_writes_documents):
+                 test_describe_and_regenerate, test_api_endpoints, test_export_formats,
+                 test_update_public_fields, test_save_meeting_writes_documents):
         try:
             func()
         except Exception as exc:

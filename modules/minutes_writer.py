@@ -258,31 +258,119 @@ def _discussion_points(transcriptions, compliance=None, max_points=12):
     return points
 
 
+def _extract_owner(item):
+    """从待办事项里猜负责人（「由X负责」「请X」「X跟进」这类写法）。"""
+    patterns = (
+        r'由\s*([^\s，。；、]{2,6}?)\s*(?:负责|牵头|跟进|落实|对接|准备|同步)',
+        r'请\s*([^\s，。；、]{2,6}?)\s*(?:负责|牵头|跟进|落实|准备|同步)',
+        r'([^\s，。；、]{2,6}?)\s*(?:负责|牵头|跟进|落实)',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, item)
+        if match:
+            candidate = match.group(1).strip()
+            if candidate and candidate not in ('相关', '有关', '我们', '大家', '部门'):
+                return candidate
+    return ''
+
+
+def _extract_deadline(item):
+    """从待办事项里猜时间节点（本周五 / 下周三 / 月底 / 12月15日…）。"""
+    patterns = (
+        r'(本|下|这)?周[一二三四五六日天]',
+        r'(今|明|后)天',
+        r'\d{1,2}\s*月\s*\d{1,2}\s*[日号]',
+        r'(本|下)?月(底|初|中)',
+        r'(两周|一周|三天|五天|十天|半个月|一个半月)(内|之内|以内)?',
+        r'[Vv]?\d+(\.\d+)?\s*版本?',
+    )
+    found = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, item):
+            text = match.group(0).strip()
+            if text and text not in found:
+                found.append(text)
+    return '、'.join(found[:2])
+
+
+def _action_table(actions):
+    """待办事项做成「事项 / 负责人 / 时间」表格（负责人与时间从文字里提，提不到留空）。"""
+    rows = [['事项', '负责人', '时间']]
+    for item in actions:
+        text = str(item).strip().rstrip('。；')
+        if not _looks_like_action(text):
+            continue
+        rows.append([text, _extract_owner(text) or '—', _extract_deadline(text) or '—'])
+    return rows if len(rows) > 1 else None
+
+
+# 待办事项必须带「动作」——否则会把「完成了百分之四十」「请介绍一下技术情况」
+# 这类陈述句/提问当成待办，纪要的表格就成了一句句话的堆砌
+_ACTION_VERBS = (
+    '完成', '提交', '提供', '组织', '准备', '上线', '对接', '同步', '优化', '调整',
+    '落实', '跟进', '安排', '培训', '评审', '整改', '汇报', '确认', '补充', '部署',
+    '测试', '修复', '更新', '梳理', '协调', '整理', '编写', '制定', '推进', '排查',
+)
+# 明显不是待办的开头（陈述已完成、或者提问）
+_NOT_ACTION_HEADS = (
+    '完成', '目前', '大概', '可能', '已经', '因为', '但是', '所以', '如果', '这个',
+    '那', '嗯', '啊', '好的', '对', '是',
+)
+# 待办要带「要做什么」的语气；只有动词没有任务语气的多为状态汇报
+_TASK_MARKERS = (
+    '需要', '需', '必须', '要求', '请', '计划', '预计', '安排', '负责', '牵头',
+    '跟进', '落实', '下周', '本周', '月底', '之前', '以前', '尽快', '后续',
+    '下一步', '待', '将于', '前完成', '前提交', '内完成',
+)
+# 动作词后面接这些词时是名词（「推进会」「测试结果」「优化方案」），不是动作
+_NOUN_SUFFIXES = (
+    '会', '方案', '结果', '报告', '工作', '情况', '进度', '问题', '版本',
+    '模块', '系统', '功能', '计划', '目标', '指标', '环节', '流程',
+)
+
+
+def _has_action_verb(text):
+    """找出真正当动词用的动作词，跳过「推进会」「测试结果」这类名词搭配。"""
+    for verb in _ACTION_VERBS:
+        start = 0
+        while True:
+            index = text.find(verb, start)
+            if index < 0:
+                break
+            tail = text[index + len(verb):index + len(verb) + 2]
+            if not any(tail.startswith(suffix) for suffix in _NOUN_SUFFIXES):
+                return True
+            start = index + 1
+    return False
+
+
+def _looks_like_action(text):
+    """粗筛待办：要有动作词、任务语气、长度合适，且不是「已完成…」「大概…」这类陈述。"""
+    body = (text or '').strip()
+    if not (8 <= len(body) <= 60):
+        return False
+    if any(body.startswith(head) for head in _NOT_ACTION_HEADS):
+        return False
+    if body.endswith(('？', '?')):
+        return False
+    if not _has_action_verb(body):
+        return False
+    return any(marker in body for marker in _TASK_MARKERS)
+
+
 def build_minutes_document(meeting, transcriptions, compliance=None, body=None):
     """
-    会议纪要：按公文通用格式撰写。
+    会议纪要：标题 + 会议信息 + 摘要 + 讨论要点 + 决议 + 待办 + 合规 + 落款。
 
-    结构来自公开的公文写作规范（会议纪要由「标题 + 会议组织情况 + 会议内容 + 落款」构成，
-    会议内容用「会议听取了 / 会议认为 / 会议决定 / 会议要求」这类引导语分条列出，
-    纪要是概括性文书，逐字全文不入纪要、另存《会议记录全文》）：
+    版式参考飞书妙记：先给一段摘要，再把「讨论要点」做成短条目，
+    决议与待办单独成节，待办用表格（事项 / 负责人 / 时间）。
+    会议组织情况（名称/时间/地点/主持人/出席人员/记录人）保留公文要素。
 
-        标题：×××会议纪要
-        会议名称 / 时间 / 地点 / 主持人 / 出席人员 / 列席人员 / 缺席人员 / 记录人 / 会议议题
-        一、会议概况          —— 会议召开情况与总体内容
-        二、会议听取了下列发言 —— 纪要正文：由 text_analyzer.distill_minutes 归纳
-                                  （口语转规范语、分条、带公文引导语），
-                                  没有归纳结果时退回按发言人列要点
-        三、会议决定          —— 议定事项，分条列述
-        四、会议要求          —— 落实要求与任务分工
-        五、合规与风险提示    —— 本系统的合规比对结论
-        落款                  —— 整理单位 + 成文日期
-
-    body 是已经归纳好的正文条目列表（形如 ['1. 会议听取了，……', ...]），
-    由调用方（分析流水线 / 接口）生成并缓存到 meeting.minutes_body。
+    body 是已经归纳好的要点列表（由 text_analyzer.distill_minutes 生成并缓存）。
     """
     title = getattr(meeting, 'title', '') or '未命名会议'
     created = getattr(meeting, 'date', None) or getattr(meeting, 'created_at', None)
-    created_text = (created.strftime('%Y年%m月%d日 %H时%M分')
+    created_text = (created.strftime('%Y年%m月%d日 %H:%M')
                     if isinstance(created, datetime) else _MOMENT_PLACEHOLDER)
     stamp_date = (created.strftime('%Y年%m月%d日')
                   if isinstance(created, datetime) else datetime.now().strftime('%Y年%m月%d日'))
@@ -294,7 +382,6 @@ def build_minutes_document(meeting, transcriptions, compliance=None, body=None):
               for t in _as_list(getattr(meeting, 'topics', None))]
     keywords = [str(k.get('word') if isinstance(k, dict) else k)
                 for k in _as_list(getattr(meeting, 'keywords', None))]
-    topic_text = '、'.join(topics[:5]) if topics else '（待补充）'
 
     if body is None:
         body = _as_list(getattr(meeting, 'minutes_body', None))
@@ -308,95 +395,96 @@ def build_minutes_document(meeting, transcriptions, compliance=None, body=None):
         info['count'] += 1
         info['chars'] += len(seg.get('text') or '')
     total_chars = max(1, sum(v['chars'] for v in speakers.values()))
-    speaker_parts = [f'{name}（发言 {info["count"]} 句，占 {info["chars"] / total_chars * 100:.0f}%）'
+    speaker_parts = [f'{name}（{info["count"]} 句，'
+                     f'{info["chars"] / total_chars * 100:.0f}%）'
                      for name, info in sorted(speakers.items())]
-    attendee_text = (f'共 {len(speakers)} 人：' + '；'.join(speaker_parts)) if speaker_parts \
-        else '（待补充）'
 
-    lines = [f'# {title} 会议纪要', '']
+    lines = [f'# {title} · 会议纪要', '']
 
-    # ---- 会议组织情况（公文里各自单独成段）----
-    lines.append(f'会议名称：{title}')
-    lines.append(f'时　　间：{created_text}（时长 {format_duration(duration)}）')
-    lines.append(f'地　　点：{getattr(meeting, "location", None) or _MOMENT_PLACEHOLDER}')
-    lines.append(f'主 持 人：{getattr(meeting, "host", None) or _MOMENT_PLACEHOLDER}')
-    lines.append(f'出席人员：{attendee_text}')
-    lines.append('列席人员：—')
-    lines.append('缺席人员：—')
-    lines.append(f'记 录 人：{getattr(meeting, "recorder", None) or _RECORDER_FALLBACK}')
-    lines.append(f'会议议题：{topic_text}')
-    lines.append('')
-    lines.append('> 说明：参会人员为系统按声纹聚类自动编号，姓名与职务请人工核对后补充；'
-                 '「地点/主持人」可在页面「编辑会议信息」中填写，重新生成文档即会带上。')
+    # ---- 会议信息（表格，紧凑好读）----
+    lines.append('| 项目 | 内容 |')
+    lines.append('| --- | --- |')
+    lines.append(f'| 会议时间 | {created_text}（{format_duration(duration)}） |')
+    lines.append(f'| 会议地点 | {getattr(meeting, "location", None) or "—"} |')
+    lines.append(f'| 主 持 人 | {getattr(meeting, "host", None) or "—"} |')
+    lines.append(f'| 参会人员 | {len(speakers) or 1} 人：{"；".join(speaker_parts) or "SPEAKER_00"} |')
+    lines.append(f'| 记 录 人 | {getattr(meeting, "recorder", None) or _RECORDER_FALLBACK} |')
+    if topics:
+        lines.append(f'| 会议议题 | {"、".join(topics[:5])} |')
     lines.append('')
 
-    lines.append('## 一、会议概况')
+    # ---- 一、会议摘要 ----
+    lines.append('## 一、会议摘要')
     lines.append((getattr(meeting, 'summary', '') or '（暂无摘要）').strip())
-    if keywords:
-        lines.append('')
-        lines.append(f'本次会议涉及的关键词：{"、".join(keywords[:12])}。')
     lines.append('')
 
-    # ---- 二、会议内容：优先用归纳好的纪要正文 ----
-    lines.append('## 二、会议听取了下列发言')
+    # ---- 二、讨论要点（飞书妙记式短条目）----
+    lines.append('## 二、讨论要点')
     if body:
+        bullets = []
         for item in body:
             text = str(item).strip()
-            if text:
-                lines.append(text)
+            # 缓存里可能是旧版带编号/引导语的条目，这里剥掉，避免「1. 1. 会议听取了，…」
+            text = re.sub(r'^\d+[.、)]\s*', '', text)
+            for lead in ('会议听取了', '会议认为', '会议指出', '会议强调',
+                         '会议明确', '会议讨论了'):
+                if text.startswith(lead):
+                    text = text[len(lead):].lstrip('，,：: ')
+                    break
+            text = text.strip().strip('。；; ')
+            if not text:
+                continue
+            if not text.endswith(('！', '？', '…')):
+                text += '。'
+            bullets.append(f'{len(bullets) + 1}. {text}')
+        if bullets:
+            lines.extend(bullets)
+        else:
+            lines.append('本次会议没有可用的转写内容。')
     else:
-        # 没有归纳结果（例如老记录）：退回按发言人整理发言要点
         points = _discussion_points(transcriptions)
         if points:
-            blocks = []
-            for item in points:
-                if blocks and blocks[-1]['speaker'] == item['speaker']:
-                    blocks[-1]['items'].append(item)
-                else:
-                    blocks.append({'speaker': item['speaker'], 'items': [item]})
-            for index, block in enumerate(blocks, 1):
-                order = _CN_NUMBERS[index - 1] if index <= len(_CN_NUMBERS) else str(index)
-                head = f'（{order}）{block["speaker"]}'
-                if len(block['items']) == 1:
-                    lines.append(f'{head}：{block["items"][0]["text"]}')
-                else:
-                    lines.append(f'{head}：')
-                    for item in block['items']:
-                        lines.append(f'- [{item["time"]}] {item["text"]}')
+            for index, item in enumerate(points, 1):
+                lines.append(f'{index}. {item["text"]}')
         else:
-            lines.append('（本次会议没有可用的转写内容）')
+            lines.append('本次会议没有可用的转写内容。')
     lines.append('')
 
-    lines.append('## 三、会议决定')
+    # ---- 三、决议事项 ----
+    lines.append('## 三、决议事项')
     if decisions:
         for index, item in enumerate(decisions, 1):
-            lines.append(f'{index}. {item}')
+            lines.append(f'{index}. {str(item).rstrip("。；")}。')
     else:
         lines.append('本次会议未形成明确的决议事项。')
     lines.append('')
 
-    lines.append('## 四、会议要求')
-    if actions:
-        lines.append('会议要求，抓紧落实以下事项：')
-        for index, item in enumerate(actions, 1):
-            lines.append(f'{index}. {item}')
+    # ---- 四、待办事项（表格）----
+    lines.append('## 四、待办事项')
+    table = _action_table(actions) if actions else None
+    if table:
+        for index, row in enumerate(table):
+            lines.append('| ' + ' | '.join(row) + ' |')
+            if index == 0:
+                lines.append('| --- | --- | --- |')
     else:
-        lines.append('本次会议未提出明确的落实事项。')
+        lines.append('本次会议未提出明确的待办事项。')
     lines.append('')
 
+    # ---- 五、合规与风险提示 ----
     lines.append('## 五、合规与风险提示')
     if compliance:
-        lines.append(f'经与知识库比对，本次会议合规得分 '
-                     f'**{float(compliance.get("total_score", 0)):.1f} 分**'
+        lines.append(f'合规得分 **{float(compliance.get("total_score", 0)):.1f} 分**'
                      f'{("（" + compliance.get("score_level", "") + "）") if compliance.get("score_level") else ""}。')
         components = compliance.get('components') or compliance.get('detailed_scores') or {}
         if components:
             detail = '、'.join(f'{key} {float(value):.1f}' for key, value in components.items())
+            lines.append('')
             lines.append(f'- 分项得分：{detail}')
         risks = compliance.get('risk_keywords') or []
         markers = compliance.get('risk_time_markers') or []
         if risks:
-            lines.append('- 会议中出现的风险表述：')
+            lines.append('- 风险表述：')
             if markers:
                 for marker in markers[:10]:
                     if isinstance(marker, dict):
@@ -424,6 +512,8 @@ def build_minutes_document(meeting, transcriptions, compliance=None, body=None):
     lines.append('')
     lines.append(f'记录整理：{_RECORDER_FALLBACK}')
     lines.append(f'成文日期：{stamp_date}')
+    if keywords:
+        lines.append(f'关键词：{"、".join(keywords[:12])}')
     lines.append('')
     lines.append('> 本纪要由会议室智能合规分析系统依据录音自动整理生成，'
                  '议定事项与人员姓名请以会议实际表决结果为准；逐字发言见同目录《会议记录全文》。')

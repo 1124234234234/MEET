@@ -222,12 +222,97 @@ def test_realtime_labelling():
            all(seg.get('speaker') for seg in final['transcriptions']))
 
 
+def test_pitch_split():
+    """
+    同一声线变调合成的多人音频：音高三维峰要能拆出三个人，真单人不能拆。
+
+    背景：用户给的测试音频（D:\\games\\新建文件夹 (7)\\meeting_sample.wav，3 个角色）
+    是同一台 SAPI 中文声线 + 变调 0.82/1.12/1.32 合成的，音色几乎一样，MFCC 只分得
+    出 1 个人；但基频被整体平移，音高分布是 3 个隔开 3~5 个半音的峰。这里用纯音
+    序列复现两种情形（不依赖那份 8MB 录音）：
+      - 三段不同频率交替出现 → 应拆成 3 人
+      - 单一频率 / 连续滑音（真人语调）→ 不应拆
+    """
+    print('\n[7] 音高二次判断（同一声线变调）')
+    import numpy as np
+
+    from modules import speaker_diarization as sd
+
+    sr = 16000
+    step = 0.5
+    window_len = 1.5
+
+    def build(segments, total_seconds=90.0):
+        """segments: [(频率Hz, 持续秒数), ...] 循环铺满 total_seconds。"""
+        samples = int(total_seconds * sr)
+        t = np.arange(samples) / sr
+        signal = np.zeros(samples, dtype=np.float32)
+        cursor = 0.0
+        index = 0
+        while cursor < total_seconds:
+            freq, dur = segments[index % len(segments)]
+            start = int(cursor * sr)
+            stop = min(samples, int((cursor + dur) * sr))
+            local_t = t[start:stop]
+            # 加一点二次谐波，更接近真实嗓音
+            signal[start:stop] = (0.5 * np.sin(2 * np.pi * freq * local_t)
+                                  + 0.2 * np.sin(4 * np.pi * freq * local_t))
+            cursor += dur
+            index += 1
+        windows = []
+        pos = 0.0
+        while pos + window_len <= total_seconds:
+            windows.append((round(pos, 2), round(pos + window_len, 2)))
+            pos += step
+        return signal, windows
+
+    # 1) 三个音高交替（165/220/264 Hz ≈ 相对 3~4.7 个半音）
+    audio, windows = build([(165, 10), (220, 10), (264, 10)])
+    labels = sd._split_by_pitch(audio, windows, sr)
+    count = len(set(int(v) for v in labels)) if labels is not None else 1
+    record(f'三音高交替 → 拆出 {count} 人（期望 3）', count == 3)
+
+    # 2) 单一音高（真单说话人）：不应拆
+    audio_single, windows_single = build([(200, 10)])
+    record('单一音高不拆（期望 1 人）',
+           sd._split_by_pitch(audio_single, windows_single, sr) is None)
+
+    # 3) 真人语调：音高围绕个人基频连续起伏（实测真实通话的标准差约 1.3~1.6 半音），
+    #    分布是单峰连续，不是几个隔开的峰 → 不应拆
+    rng = np.random.default_rng(20261012)
+    samples = int(90.0 * sr)
+    syllable = int(0.2 * sr)
+    drift = 0.0
+    pitches = []
+    for _ in range(samples // syllable + 2):
+        drift = 0.85 * drift + float(rng.normal(0, 0.8))  # AR(1)，σ≈1.5 半音
+        drift = float(np.clip(drift, -2.5, 2.5))
+        pitches.append(200.0 * 2 ** (drift / 12))
+    glide = np.zeros(samples, dtype=np.float32)
+    for index, freq in enumerate(pitches):
+        start = index * syllable
+        if start >= samples:
+            break
+        stop = min(samples, start + syllable)
+        local_t = np.arange(stop - start) / sr
+        glide[start:stop] = (0.5 * np.sin(2 * np.pi * freq * local_t)
+                             + 0.2 * np.sin(4 * np.pi * freq * local_t))
+    record('真人语调起伏不拆（期望 1 人）',
+           sd._split_by_pitch(glide, windows_single, sr) is None)
+
+    # 4) 太短的片段不做二次判断（避免视频/音乐素材被误拆）
+    short_audio, short_windows = build([(165, 5), (220, 5), (264, 5)], total_seconds=40.0)
+    record(f'短片段不做音高拆分（{len(short_windows)} 窗口 < {sd.PITCH_SPLIT_MIN_WINDOWS}）',
+           sd._split_by_pitch(short_audio, short_windows, sr) is None)
+
+
 def main():
     print('=' * 68)
     print('说话人识别回归测试')
     print('=' * 68)
     for func in (test_speaker_counts, test_confusion_rate, test_attribution,
-                 test_quiet_speaker_kept, test_fragment_criteria, test_realtime_labelling):
+                 test_quiet_speaker_kept, test_fragment_criteria, test_realtime_labelling,
+                 test_pitch_split):
         try:
             func()
         except Exception as exc:

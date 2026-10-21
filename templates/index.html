@@ -85,6 +85,26 @@
         .doc-preview hr { border: none; border-top: 1px dashed #d9d9d9; margin: 18px 0; }
         .doc-preview strong { color: #111; }
         .doc-preview .doc-line { white-space: pre-wrap; }
+        /* 下载格式选择（单选项式卡片） */
+        .format-list { display: flex; flex-direction: column; gap: 8px; }
+        .format-option { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+                         border: 1px solid #e8e8e8; border-radius: 8px; cursor: pointer; }
+        .format-option:hover { border-color: #91caff; background: #f5faff; }
+        .format-option.selected { border-color: #1890ff; background: #e6f4ff; }
+        .format-option input { margin: 0; }
+        .format-option .fmt-label { font-size: 14px; color: #333; }
+        .format-option .fmt-ext { margin-left: auto; color: #999; font-size: 12px; }
+        /* 会议文档列表（详情页与文档页共用） */
+        .doc-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+                   border: 1px solid #f0f0f0; border-radius: 8px; margin-bottom: 8px; background:#fff; }
+        .doc-row:hover { background: #fafcff; border-color: #d6e4ff; }
+        .doc-row .doc-icon { font-size: 18px; width: 22px; text-align: center; }
+        .doc-row .doc-meta { flex: 1; min-width: 0; }
+        .doc-row .doc-name { font-size: 14px; color: #262626; font-weight: 600; }
+        .doc-row .doc-desc { font-size: 12px; color: #8c8c8c; margin-top: 2px; }
+        .doc-row .doc-actions { display: flex; gap: 6px; flex-shrink: 0; }
+        .doc-path { font-size: 12px; color: #999; word-break: break-all; margin-top: 10px;
+                    padding: 8px 10px; background: #fafafa; border-radius: 6px; }
     </style>
 </head>
 <body>
@@ -431,6 +451,23 @@
         </div>
     </div>
 
+    <div class="modal" id="download-format-modal">
+        <div class="modal-content" style="max-width: 520px;">
+            <div class="modal-header">
+                <h3 id="download-dialog-title">选择下载格式</h3>
+                <button class="modal-close" onclick="closeDownloadDialog()">×</button>
+            </div>
+            <div style="padding: 0 20px 20px;">
+                <p id="download-dialog-hint" style="color:#666; font-size:13px; margin-bottom:14px;"></p>
+                <div id="download-format-list" class="format-list"></div>
+                <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:18px;">
+                    <button class="btn btn-secondary" onclick="closeDownloadDialog()">取消</button>
+                    <button class="btn btn-primary" onclick="confirmDownload()">下载</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="modal" id="doc-preview-modal">
         <div class="modal-content" style="max-width: 900px;">
             <div class="modal-header">
@@ -443,8 +480,8 @@
                 <span style="flex:1;"></span>
                 <button class="btn btn-secondary" id="doc-preview-switch"
                         onclick="switchDocPreview()">切换到另一份</button>
-                <button class="btn btn-secondary" onclick="revealDocuments(currentMeetingId)">📂 打开所在文件夹</button>
-                <a class="btn btn-primary" id="doc-preview-download" href="#" target="_blank">下载</a>
+                <button class="btn btn-secondary" onclick="revealDocuments(docPreviewState.meetingId)">📂 打开所在文件夹</button>
+                <button class="btn btn-primary" onclick="openDownloadDialog(docPreviewState.meetingId, docPreviewState.order[docPreviewState.index])">下载（可选格式）</button>
             </div>
             <div id="doc-preview-body" class="doc-preview"></div>
         </div>
@@ -554,15 +591,91 @@
 
         // ---------------- 会议文档（会议纪要 / 会议记录概要 / 记录全文） ----------------
 
-        function documentLink(meetingId, kind) {
-            return `${API_BASE}/meetings/${meetingId}/documents/${kind}`;
+        function documentLink(meetingId, kind, format) {
+            const suffix = format ? `?format=${format}` : '';
+            return `${API_BASE}/meetings/${meetingId}/documents/${kind}${suffix}`;
         }
 
-        const DOC_KIND_LABEL = {
-            minutes: '会议纪要',
-            summary: '会议记录概要',
-            transcript: '会议记录全文'
+        // ---------------- 下载格式弹窗 ----------------
+
+        let downloadTarget = {meetingId: null, kind: null, format: 'docx'};
+
+        function openDownloadDialog(meetingId, kind) {
+            downloadTarget = {meetingId: meetingId, kind: kind, format: 'docx'};
+            const label = DOC_KIND_LABEL[kind] || kind;
+            document.getElementById('download-dialog-title').textContent = `下载${label}`;
+            document.getElementById('download-dialog-hint').textContent =
+                '选择文件格式后点击「下载」。转换后的文件会同时保存在该会议目录里，方便日后查找。';
+            renderFormatOptions();
+            document.getElementById('download-format-modal').classList.add('show');
+        }
+
+        function renderFormatOptions() {
+            const box = document.getElementById('download-format-list');
+            box.innerHTML = DOC_FORMATS.map((item) => {
+                const selected = item.format === downloadTarget.format ? ' selected' : '';
+                return `<label class="format-option${selected}" data-format="${item.format}">
+                    <input type="radio" name="doc-format" value="${item.format}"
+                           ${item.format === downloadTarget.format ? 'checked' : ''}>
+                    <span class="fmt-label">${item.label}</span>
+                    <span style="color:#999;font-size:12px;">${item.hint}</span>
+                    <span class="fmt-ext">${item.ext}</span>
+                </label>`;
+            }).join('');
+            box.querySelectorAll('.format-option').forEach((option) => {
+                option.addEventListener('click', () => {
+                    downloadTarget.format = option.getAttribute('data-format');
+                    renderFormatOptions();
+                });
+            });
+        }
+
+        function confirmDownload() {
+            const {meetingId, kind, format} = downloadTarget;
+            if (!meetingId) return;
+            window.open(documentLink(meetingId, kind, format), '_blank');
+            closeDownloadDialog();
+        }
+
+        function closeDownloadDialog() {
+            document.getElementById('download-format-modal').classList.remove('show');
+        }
+
+        // 单份文档的一行（图标 + 名称 + 说明 + 预览/下载）
+        function docRow(meetingId, kind, exists, size) {
+            const info = DOC_KIND_INFO[kind] || {icon: '📄', desc: ''};
+            const label = DOC_KIND_LABEL[kind] || kind;
+            const actions = exists
+                ? `<button class="btn btn-secondary" style="padding:4px 12px; font-size:12px;"
+                        onclick="openDocPreview(${meetingId}, '${kind}')">预览</button>
+                   <button class="btn btn-primary" style="padding:4px 12px; font-size:12px;"
+                        onclick="openDownloadDialog(${meetingId}, '${kind}')">下载</button>`
+                : `<span style="color:#bbb; font-size:12px;">未生成</span>`;
+            const sizeText = exists ? ` · ${Math.max(1, Math.round((size || 0) / 1024))} KB` : '';
+            return `<div class="doc-row">
+                <span class="doc-icon">${info.icon}</span>
+                <div class="doc-meta">
+                    <div class="doc-name">${label}<span style="color:#bbb;font-weight:400;font-size:12px;">${sizeText}</span></div>
+                    <div class="doc-desc">${info.desc}</div>
+                </div>
+                <div class="doc-actions">${actions}</div>
+            </div>`;
+        }
+
+        // 文档类型说明（详情页与文档页共用）
+        const DOC_KIND_INFO = {
+            minutes: {icon: '📝', desc: '摘要 · 讨论要点 · 决议 · 待办 · 合规提示'},
+            summary: {icon: '📋', desc: '一页速览：时间 / 参会人 / 评分 / 待办'},
+            transcript: {icon: '🗒️', desc: '逐字转写，带说话人与时间'}
         };
+
+        // 支持的导出格式（与 modules/document_export.EXPORT_FORMATS 保持一致）
+        const DOC_FORMATS = [
+            {format: 'docx', label: 'Word 文档', ext: '.docx', hint: '适合编辑、盖章、发给领导'},
+            {format: 'pdf', label: 'PDF', ext: '.pdf', hint: '版式固定，适合归档与打印'},
+            {format: 'md', label: 'Markdown', ext: '.md', hint: '纯文本标记，便于二次整理'},
+            {format: 'txt', label: '纯文本', ext: '.txt', hint: '可直接粘贴到聊天工具'}
+        ];
 
         function escapeHtml(text) {
             return String(text === undefined || text === null ? '' : text)
@@ -717,9 +830,6 @@
             document.getElementById('doc-preview-path').textContent =
                 `本地路径（可直接在资源管理器打开）：${state.directory}`;
             document.getElementById('doc-preview-body').innerHTML = renderMarkdown(content);
-            const download = document.getElementById('doc-preview-download');
-            download.href = documentLink(state.meetingId, kind);
-            download.textContent = `下载${DOC_KIND_LABEL[kind] || ''}`;
             document.getElementById('doc-preview-switch').style.display =
                 state.order.length > 1 ? '' : 'none';
         }
@@ -766,33 +876,24 @@
                         + '完成一次会议分析后会自动生成。</span>';
                     return;
                 }
-                let html = `<p style="color:#666; font-size:13px;">共 ${data.total} 场会议 · `
-                     + `文档根目录：<code>${escapeHtml(data.root || '')}</code>`
-                     + `（在项目目录下，按「年-月 / 日期_标题_会议id」分层）</p>`;
+                let html = `<p style="color:#666; font-size:13px; margin-bottom:12px;">共 ${data.total} 场会议 · `
+                     + `文档根目录 <code>${escapeHtml(data.root || '')}</code></p>`;
                 months.forEach((month) => {
                     html += `<div style="margin-bottom:18px;">`
                          + `<h4 style="margin-bottom:8px; color:#1890ff;">📅 ${month.month}`
                          + `（${month.meetings.length} 场）</h4>`;
                     month.meetings.forEach((meeting) => {
-                        const docs = (meeting.documents || []).map((doc) => {
-                            const label = DOC_KIND_LABEL[doc.kind] || doc.name;
-                            if (!doc.exists) {
-                                return `<span style="color:#bbb;">${label}（未生成）</span>`;
-                            }
-                            return `<button class="btn btn-secondary" style="padding:2px 10px; font-size:12px;"`
-                                + ` onclick="openDocPreview(${meeting.meeting_id}, '${doc.kind}')">`
-                                + `预览 ${label}</button>`
-                                + ` <a href="${documentLink(meeting.meeting_id, doc.kind)}"`
-                                + ` style="color:#1890ff; font-size:12px;">下载</a>`;
-                        }).join(' &nbsp; ');
-                        html += `<div style="padding:8px 0; border-bottom:1px solid #f0f0f0;">`
-                             + `<div><strong>${escapeHtml(meeting.title)}</strong>`
+                        const docs = (meeting.documents || []).map((doc) =>
+                            docRow(meeting.meeting_id, doc.kind, doc.exists, doc.size)
+                        ).join('');
+                        html += `<div style="padding:10px 0; border-bottom:1px solid #f0f0f0;">`
+                             + `<div style="margin-bottom:8px;"><strong>${escapeHtml(meeting.title)}</strong>`
                              + `<span style="color:#999; font-size:12px; margin-left:8px;">`
                              + `${meeting.date} · ${meeting.duration} 秒`
                              + `${meeting.score !== null && meeting.score !== undefined ? ' · 合规 ' + meeting.score.toFixed(1) + ' 分' : ''}`
                              + `</span></div>`
-                             + `<div style="font-size:13px; margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">${docs}</div>`
-                             + `<div style="color:#bbb; font-size:12px; margin-top:4px;">📁 ${escapeHtml(meeting.directory)}</div>`
+                             + docs
+                             + `<div class="doc-path">📁 ${escapeHtml(meeting.directory)}</div>`
                              + `</div>`;
                     });
                     html += `</div>`;
@@ -1685,24 +1786,21 @@
             }
 
             document.getElementById('modal-body').innerHTML = `
-                <div style="margin-bottom:20px; padding:12px; background:#fffbe6; border-radius:8px; border-left:4px solid #faad14;">
-                    <h4 style="margin-bottom:8px;">📄 会议文档</h4>
-                    <p style="font-size:13px; color:#666; margin-bottom:8px; line-height:1.7;">
-                        系统按公文格式自动整理了三份文件，按日期归档到
-                        <code>records/&lt;年-月&gt;/&lt;日期_标题_id&gt;/</code>（项目目录下）：
-                        <strong>会议纪要</strong>（会议名称/时间/地点/主持人/出席人员/记录人 +
-                        会议概况、听取的发言、会议决定、会议要求、合规提示、落款）、
-                        <strong>会议记录概要</strong>（一页速览）、
-                        <strong>会议记录全文</strong>（逐字转写，带说话人与时间）。
-                    </p>
-                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                        <button class="btn btn-primary" onclick="openDocPreview(${data.id}, 'minutes')">📖 预览会议纪要</button>
-                        <button class="btn btn-secondary" onclick="openDocPreview(${data.id}, 'summary')">预览概要</button>
-                        <button class="btn btn-secondary" onclick="openDocPreview(${data.id}, 'transcript')">预览全文</button>
-                        <button class="btn btn-secondary" onclick="revealDocuments(${data.id})">📂 打开所在文件夹</button>
-                        <button class="btn btn-secondary" onclick="regenerateDocuments(${data.id})">重新生成</button>
+                <div style="margin-bottom:20px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+                        <h4 style="margin:0;">📄 会议文档</h4>
+                        <span style="color:#999; font-size:12px;">按日期自动归档，可预览或下载</span>
                     </div>
-                    ${data.documents_dir ? `<div style="color:#999; font-size:12px; margin-top:8px; word-break:break-all;">📁 ${escapeHtml(data.documents_dir)}</div>` : ''}
+                    ${docRow(data.id, 'minutes', true, 0)}
+                    ${docRow(data.id, 'summary', true, 0)}
+                    ${docRow(data.id, 'transcript', true, 0)}
+                    <div class="doc-path">📁 ${escapeHtml(data.documents_dir || '（尚未生成，点击「重新生成」）')}</div>
+                    <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+                        <button class="btn btn-secondary" style="padding:4px 12px; font-size:12px;"
+                                onclick="revealDocuments(${data.id})">📂 打开所在文件夹</button>
+                        <button class="btn btn-secondary" style="padding:4px 12px; font-size:12px;"
+                                onclick="regenerateDocuments(${data.id})">重新生成</button>
+                    </div>
                 </div>
                 <div style="margin-bottom:20px;">
                     <h4>基本信息</h4>

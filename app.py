@@ -1125,6 +1125,8 @@ def _meeting_documents(meeting_id, regenerate=False, distill=False):
             except OSError as exc:
                 print(f'[文档] 读取失败 {item["path"]}: {exc}')
 
+    from modules import document_export
+
     return {
         'code': 200,
         'data': {
@@ -1133,6 +1135,8 @@ def _meeting_documents(meeting_id, regenerate=False, distill=False):
             'directory': described['directory'],
             'files': described['files'],
             'contents': contents,
+            'formats': [{'format': key, 'label': label, 'extension': ext}
+                        for key, label, ext in document_export.EXPORT_FORMATS],
         },
     }
 
@@ -1166,14 +1170,24 @@ def regenerate_meeting_documents(meeting_id):
 
 @app.route('/api/meetings/<int:meeting_id>/documents/<kind>')
 def download_meeting_document(meeting_id, kind):
-    """下载指定文档（kind: minutes=会议纪要 / summary=会议记录概要 / transcript=记录全文）。"""
-    from modules import minutes_writer
+    """
+    下载指定文档。
+
+    kind: minutes=会议纪要 / summary=会议记录概要 / transcript=记录全文
+    format: md（默认）/ txt / docx / pdf —— 由 modules/document_export 现场转换，
+    转换结果与 .md 同目录同名，便于在资源管理器里直接找到。
+    """
+    from modules import document_export, minutes_writer
 
     meeting = Meeting.query.get_or_404(meeting_id)
     name = dict(minutes_writer.DOCUMENT_KINDS).get(kind)
     if not name:
         return jsonify({'code': 400,
                         'message': 'kind 只能是 minutes / summary / transcript'}), 400
+
+    fmt = (request.args.get('format') or 'md').lower().lstrip('.')
+    if fmt not in document_export.FORMAT_EXTENSIONS:
+        return jsonify({'code': 400, 'message': f'不支持的格式: {fmt}'}), 400
 
     result = _meeting_documents(meeting_id)
     if result is None:
@@ -1186,9 +1200,21 @@ def download_meeting_document(meeting_id, kind):
     if not os.path.exists(path):
         return jsonify({'code': 404, 'message': '文档不存在'}), 404
 
-    download_name = f'{meeting.title}_{name}'
-    return send_file(path, as_attachment=True, download_name=download_name,
-                     mimetype='text/markdown')
+    try:
+        export_path = document_export.export_document(path, fmt, title=meeting.title)
+    except Exception as exc:
+        print(f'[文档] 导出 {fmt} 失败: {exc}')
+        return jsonify({'code': 500, 'message': f'导出 {fmt} 失败: {exc}'}), 500
+
+    mimetypes = {
+        'md': 'text/markdown',
+        'txt': 'text/plain',
+        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'pdf': 'application/pdf',
+    }
+    download_name = f'{meeting.title}_{os.path.splitext(name)[0]}.{document_export.FORMAT_EXTENSIONS[fmt]}'
+    return send_file(export_path, as_attachment=True, download_name=download_name,
+                     mimetype=mimetypes.get(fmt, 'application/octet-stream'))
 
 
 @app.route('/api/meetings/<int:meeting_id>/documents/reveal', methods=['POST'])

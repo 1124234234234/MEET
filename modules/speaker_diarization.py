@@ -44,7 +44,6 @@ FMAX = 7600
 
 # 占比低于该阈值的簇视为噪声簇，并入最近的簇（避免把语气词判成新说话人）
 MIN_CLUSTER_SHARE = 0.03
-
 # 碎片簇判据（数据见 _merge_fragment_clusters 的说明）
 FRAGMENT_MAX_WINDOWS = 2
 FRAGMENT_MAX_SECONDS = 2.5
@@ -428,6 +427,132 @@ def _pyannote_diarize(audio_path, num_speakers=None):
         return None
 
 
+# 「同一声线变调」这类录音的音高二次判断参数（见 _split_by_pitch）
+PITCH_FRAME = 512          # 32ms
+PITCH_HOP = 320            # 20ms
+PITCH_FMIN = 60
+PITCH_FMAX = 400
+PITCH_MIN_CORR = 0.3       # 归一化自相关峰值低于此视为清音
+# 两个「说话人」的音高中心至少要差这么多（半音，12 = 一个八度）
+PITCH_MODE_MIN_GAP = 3.0
+# 每个音高峰至少要占这么多窗口，否则当噪声
+PITCH_MODE_MIN_SHARE = 0.08
+# 音高二次判断的最短语音长度（窗口数，约 150×0.5s ≈ 75 秒）。
+# 短片段（例如手机外放的教学视频、带背景音乐的小片段）里「音高峰」可能来自音乐，
+# 拆错的代价比不拆大，因此短片段不做二次判断。
+PITCH_SPLIT_MIN_WINDOWS = 150
+
+
+def _frame_f0(frames, sr):
+    """对一批帧做 FFT 自相关，返回基频（Hz；清音为 0）。"""
+    n = frames.shape[1]
+    window = np.hanning(n)
+    centered = frames - frames.mean(axis=1, keepdims=True)
+    spec = np.fft.rfft(centered * window, n=2 * n, axis=1)
+    corr = np.fft.irfft(spec * np.conj(spec), axis=1)[:, :n]
+    energy = np.maximum(corr[:, 0], 1e-9)
+    lo = max(1, int(sr / PITCH_FMAX))
+    hi = min(int(sr / PITCH_FMIN), n - 1)
+    if hi <= lo + 2:
+        return np.zeros(len(frames))
+    segment = corr[:, lo:hi]
+    peaks = np.argmax(segment, axis=1) + lo
+    peak_vals = segment[np.arange(len(peaks)), peaks - lo]
+    return np.where(peak_vals / energy >= PITCH_MIN_CORR, sr / np.maximum(peaks, 1e-6), 0.0)
+
+
+def _window_pitch(y, windows, sr):
+    """每个语音窗口的中位基频（Hz，无清音段则为 0）。"""
+    values = []
+    for start, end in windows:
+        chunk = y[int(start * sr):int(end * sr)]
+        if len(chunk) < PITCH_FRAME:
+            values.append(0.0)
+            continue
+        count = max(1, (len(chunk) - PITCH_FRAME) // PITCH_HOP)
+        frames = np.stack([chunk[i * PITCH_HOP:i * PITCH_HOP + PITCH_FRAME]
+                           for i in range(count)])
+        f0 = _frame_f0(frames, sr)
+        voiced = f0[f0 > 0]
+        values.append(float(np.median(voiced)) if len(voiced) >= 2 else 0.0)
+    return np.asarray(values, dtype=np.float64)
+
+
+def _kmeans_1d(values, k, iterations=30):
+    """一维 k-means（分位数初始化），返回按中心升序排列的中心与标签。"""
+    centers = np.percentile(values, np.linspace(10, 90, k))
+    labels = np.zeros(len(values), dtype=int)
+    for _ in range(iterations):
+        labels = np.argmin(np.abs(values[:, None] - centers[None, :]), axis=1)
+        updated = np.array([values[labels == i].mean() if np.any(labels == i) else centers[i]
+                            for i in range(k)])
+        if np.allclose(updated, centers, atol=1e-4):
+            centers = updated
+            break
+        centers = updated
+    order = np.argsort(centers)
+    remap = {old: new for new, old in enumerate(order)}
+    labels = np.array([remap[int(v)] for v in labels], dtype=int)
+    return centers[order], labels
+
+
+def _split_by_pitch(y, windows, sr):
+    """
+    当 MFCC 特征把整段录音聚成「一个人」时，再看音高是否呈多个分离的峰。
+
+    为什么需要这一步：同一台合成声线靠变调模拟多人时（测试音频常见做法），
+    音色（声道形状）几乎一样，MFCC 分不开；但基频被整体平移了，音高分布会呈现
+    几个互相隔开 3~5 个半音的峰。真实的单说话人录音则相反：音高是连续分布
+    （一句话里升调降调），峰与峰之间只有 1~2 个半音。
+
+    判据（在 5 段实测录音上标定，详见 tests/test_speaker_recognition.py）：
+      - 取 k=2..4 的一维聚类，要求相邻峰中心间距 ≥ 3 半音、每峰占比 ≥ 8%；
+      - 取满足条件的最大 k；都不满足则返回 None（维持「一个人」的结论）。
+    实测：变调 3 人音频 → 3 峰（间距 3.8/4.7 半音，占比 38/38/24%）；
+         真实单侧通话 → 间距 1.3~2.7 半音，判为单人不拆；
+         合成 3 人/2 人（不同声线）本来就能分开，不走这条路径。
+
+    Returns:
+        [(start, end), ...] 按音高峰重新划分的语音段；或 None。
+    """
+    if len(windows) < PITCH_SPLIT_MIN_WINDOWS:
+        return None
+    pitch = _window_pitch(y, windows, sr)
+    voiced = pitch > 0
+    if voiced.sum() < 12:
+        return None
+
+    logs = np.log2(pitch[voiced])
+    relative = (logs - np.median(logs)) * 12.0  # 半音，相对中位数
+
+    best = None
+    for k in (2, 3, 4):
+        if len(relative) < max(12, k * 6):
+            continue
+        centers, labels = _kmeans_1d(relative, k)
+        gaps = np.diff(centers)
+        shares = np.array([np.mean(labels == i) for i in range(k)])
+        if np.all(gaps >= PITCH_MODE_MIN_GAP) and np.all(shares >= PITCH_MODE_MIN_SHARE):
+            best = (k, centers, labels, gaps)
+    if best is None:
+        return None
+
+    k, centers, labels, gaps = best
+    print(f'  [说话人分离] MFCC 只分出 1 人，但音高有 {k} 个分离峰'
+          f'（间距 {np.round(gaps, 1).tolist()} 半音），按音高拆分')
+
+    window_labels = np.zeros(len(windows), dtype=int)
+    window_labels[voiced] = labels
+    # 清音窗口跟随前一个有声窗口
+    last = 0
+    for index in range(len(window_labels)):
+        if voiced[index]:
+            last = window_labels[index]
+        else:
+            window_labels[index] = last
+    return window_labels
+
+
 def diarize(audio_path=None, num_speakers=None, regions=None, audio=None, sr=DEFAULT_SR):
     """
     执行说话人分离。
@@ -473,13 +598,25 @@ def diarize(audio_path=None, num_speakers=None, regions=None, audio=None, sr=DEF
     print(f'  [说话人分离] 估计说话人数 {n_speakers}（{diagnostics}）')
 
     if n_speakers <= 1:
-        turns = [{'label': 0, 'start': windows[0][0], 'end': windows[-1][1]}]
+        labels = np.zeros(len(windows), dtype=int)
     else:
         labels = _cluster_once(embeddings, n_speakers)
         labels = _merge_fragment_clusters(embeddings, labels, windows)
         labels = _smooth_labels(labels)
-        turns = _windows_to_turns(windows, labels)
-        turns = _absorb_short_turns(turns)
+
+    # 退化判断：聚类「成功」但实际只留下一个说话人（常见于同一台声线变调合成的多人音频，
+    # 也见于真人单说话人录音）。这两种情况音高分布不同，交给 _split_by_pitch 再判一次。
+    shares = np.bincount(labels) / max(1, len(labels))
+    dominant = float(shares.max()) if len(shares) else 0.0
+    if num_speakers in (None, 0) and (len(np.unique(labels)) <= 1 or dominant >= 0.9):
+        pitch_labels = _split_by_pitch(y, windows, DEFAULT_SR)
+        if pitch_labels is not None and len(set(int(v) for v in pitch_labels)) >= 2:
+            labels = _smooth_labels(pitch_labels)
+        elif len(np.unique(labels)) <= 1:
+            labels = np.zeros(len(windows), dtype=int)
+
+    turns = _windows_to_turns(windows, labels)
+    turns = _absorb_short_turns(turns)
 
     segments = _relabel_by_first_appearance(turns)
     print(f'  [说话人分离] 输出 {len(segments)} 段，用时 {time.time()-t0:.1f}s')

@@ -243,6 +243,7 @@ _SPOKEN_FILLERS = (
     '唉', '哎', '啊', '呀', '哦', '嗯', '噢', '呃', '额', '哈',
     '那个', '这个', '那么', '然后', '就是', '其实', '反正', '就是那个',
     '你说', '我跟你说', '这样吧', '这样子', '怎么说呢', '对吧', '是吧',
+    '一下', '这边', '那边',
 )
 
 
@@ -259,40 +260,53 @@ def _clean_spoken(text):
 
 # 寒暄、客套与无信息内容：归纳时整句丢掉
 _SMALLTALK = re.compile(
-    r'^(你好|您好|谢谢|多谢|再见|拜拜|不客气|没关系|在吗|有空|方便吗|'
+    r'^(大家好|各位好|你好|您好|谢谢|多谢|再见|拜拜|不客气|没关系|在吗|有空|方便吗|'
     r'早上好|下午好|晚上好|好久不见|辛苦|麻烦您|不好意思|打扰|喂|哎|唉)[，,。！？!?\s]*$'
 )
 # 客套/无信息片段（出现在句中时按分句剔除）
 _SMALLTALK_CLAUSE = re.compile(
     r'(你好|您好|谢谢|多谢|再见|拜拜|不客气|在吗|有没有空|您看您|'
     r'我过来找您|给您先汇报|汇报一下|简单对接|查漏补缺|是吧|对吧|'
-    r'就是这个意思|差不多|这样吧)'
+    r'就是这个意思|差不多|这样吧|想问|想了解|想请教)'
+)
+# 疑问句不进讨论要点：纪要写的是结论和事实，问题本身没有信息量
+_QUESTION = re.compile(
+    r'(吗|呢|怎么样|怎么办|什么情况|什么进度|有没有|是否|是多少|多少|为什么|哪天|谁在|谁负责)'
 )
 
 
-# 人称与口语化表述的规范化：公文里双方用「本方/对方」，不用「我/您」。
+# 人称与口语化表述的规范化：公文里双方用「我方/对方」，不用「我/您」。
 # 只做等价替换，不改变事实，因此不需要模型参与也能安全套用。
 _PERSON_FIXES = (
-    ('现在之前', '此前'), ('我这边', '本方'), ('您这边', '对方'),
+    ('现在之前', '此前'), ('我这边', '我方'), ('您这边', '对方'),
     ('给我推荐', '推荐'), ('给我介绍', '介绍'), ('联系您', '与对方对接'),
     ('给您', '为对方'), ('跟您', '与对方'), ('和您', '与对方'),
-    ('您看', ''), ('您', '对方'), ('咱们', '双方'), ('我们', '本方'),
+    ('您看', ''), ('您', '对方'), ('咱们', '双方'), ('我们', '我方'),
     ('我过来找您', '上门对接'), ('过来找您', '上门对接'),
-    ('我', '本方'), ('平常', '一向'),
+    # 含「我」但不是第一人称的词，先按整体映射掉，避免拆成「我方国」这类错词
+    ('我国', '国内'), ('我司', '本公司'), ('我行', '本行'),
+    ('自我', '自身'), ('忘我', '忘我'),
+    ('我', '我方'), ('平常', '一向'),
 )
 # 替换后可能出现重复或语病，统一收尾
 _AFTER_FIXES = (
-    ('对方对方', '对方'), ('本方本方', '本方'), ('双方双方', '双方'),
-    ('本方与对方对接对接', '与对方对接'), ('，,', '，'), ('，。', '。'),
-    ('本方是', '本方人员系'), ('对方方', '对方'),
+    ('对方对方', '对方'), ('我方我方', '我方'), ('双方双方', '双方'),
+    ('我方与对方对接对接', '与对方对接'), ('，,', '，'), ('，。', '。'),
+    ('我方公司', '本公司'), ('我方是', '我方人员系'), ('对方方', '对方'),
+    ('我方方', '我方'), ('本方方', '我方'), ('本方', '我方'),
 )
+# 单遍替换：按长度从长到短匹配，替换出来的「我方」不会再被下一条规则处理成
+# 「我方方」（逐条 str.replace 时，「我们」→「我方」后，「我」的规则会再命中一次）
+_PERSON_PATTERN = re.compile(
+    '|'.join(re.escape(source) for source, _ in
+             sorted(_PERSON_FIXES, key=lambda item: -len(item[0])))
+)
+_PERSON_MAP = dict(_PERSON_FIXES)
 
 
 def _normalize_person(text):
-    """把第一/第二人称改写成公文里的「本方/对方」。"""
-    normalized = text or ''
-    for source, target in _PERSON_FIXES:
-        normalized = normalized.replace(source, target)
+    """把第一/第二人称改写成公文里的「我方/对方」。"""
+    normalized = _PERSON_PATTERN.sub(lambda match: _PERSON_MAP[match.group(0)], text or '')
     for source, target in _AFTER_FIXES:
         normalized = normalized.replace(source, target)
     normalized = re.sub(r'^[，,、。\s]+', '', normalized)
@@ -300,142 +314,130 @@ def _normalize_person(text):
     return normalized
 
 
+_CN_DIGITS = {
+    '零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+    '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
+}
+_CN_UNITS = {'十': 10, '百': 100, '千': 1000}
+_CN_NUM_CHARS = '零〇一二两三四五六七八九十百千点'
+
+
+def _cn_number(token):
+    """中文数字 → 阿拉伯数字（「六十五」→ 65，「九十二点三」→ 92.3）。"""
+    integer, _, decimal = (token or '').partition('点')
+    section = 0
+    number = 0
+    for char in integer:
+        if char in _CN_DIGITS:
+            number = _CN_DIGITS[char]
+        elif char in _CN_UNITS:
+            section += (number or 1) * _CN_UNITS[char]
+            number = 0
+        else:
+            return None
+    total = section + number
+    if decimal:
+        digits = ''.join(str(_CN_DIGITS[c]) for c in decimal if c in _CN_DIGITS)
+        if not digits:
+            return None
+        return f'{total}.{digits}'
+    return str(total)
+
+
+def _spoken_to_written(text):
+    """
+    把口语里的中文数字改写成书面阿拉伯数字（只做等价替换，不改事实）。
+
+    例：「大概在百分之六十五左右」→「约65%」；
+    「并发五百时响应一点二秒」→「并发500时响应1.2秒」；「v二点零」→「V2.0」。
+    """
+    written = text or ''
+    written = re.sub(
+        rf'百分之([{_CN_NUM_CHARS}]+)',
+        lambda match: (_cn_number(match.group(1)) or match.group(1)) + '%',
+        written,
+    )
+    written = re.sub(
+        rf'[vV]([{_CN_NUM_CHARS}]+)',
+        lambda match: 'V' + (_cn_number(match.group(1)) or match.group(1)),
+        written,
+    )
+    written = re.sub(
+        rf'([{_CN_NUM_CHARS}]+)的情况下',
+        lambda match: (_cn_number(match.group(1)) or match.group(1)) + '的情况下',
+        written,
+    )
+    written = re.sub(
+        rf'([{_CN_NUM_CHARS}]+)(的?)(个月|分钟|小时|秒|天|周|年|月|日|人|位|条|个|次|份|项|台|元)',
+        lambda match: (
+            (_cn_number(match.group(1)) or match.group(1))
+            + match.group(2) + match.group(3)
+        ),
+        written,
+    )
+    for source, target in (('pdf', 'PDF'), ('word', 'Word'), ('excel', 'Excel')):
+        written = re.sub(rf'(?<![A-Za-z]){source}(?![A-Za-z])', target,
+                         written, flags=re.IGNORECASE)
+    written = re.sub(r'大概在?(.+?)左右', r'约\1', written)
+    written = written.replace('大概', '约').replace('了的', '了')
+    return written
+
+
+# 句首的应声/称呼（「好的，张总，…」「嗯对，李工，…」）：整段去掉后再取要点
+_ACK_PREFIX = re.compile(
+    r'^(?:好的?|好|嗯+|对|对的|是|行的|可以|没问题|明白|知道了|收到)[，,、\s]*'
+    r'(?:[^\s，。,]{1,4}(?:总|工|经理|老师|主任|部长|老板)[，,、\s]*)?'
+)
+# 单条要点最长保留多少字（超出在分句边界截断）
+BULLET_MAX_CHARS = 60
+
+
 def _condense(sentence):
     """
-    把一句口语压成纪要里能用的短句：删客套、去重复分句、人称规范化、截断。
+    把一句口语压成纪要里能用的要点：删应声/称呼/客套，取核心分句，限长。
 
-    例：「唉，李总你好，我是中国人寿的小王。现在之前王总啊给我推荐联系您啊，
-    他之前在我这边配置了那个全家医疗险和重疾险，觉得咱们这个方案还是比较实在的。」
-    →「中国人寿小王经王总推荐与对方对接；对方此前已配置全家医疗险和重疾险。」
+    例：「好的，张总，目前智能客服V2.0的核心模块开发进度大概在百分之六十五左右，
+    意图识别模块已经完成训练和测试，准确率达到了百分之九十二点三。」
+    →「智能客服V2.0核心模块开发进度约百分之六十五，意图识别已完成训练测试，准确率92.3%」
     """
     text = _clean_spoken(sentence)
     if not text:
         return ''
+    # 去掉句首应声与称呼，只保留一次（避免「好的，张总，嗯，对，」这种叠加）
+    for _ in range(3):
+        stripped = _ACK_PREFIX.sub('', text).strip()
+        if stripped == text:
+            break
+        text = stripped
+    if not text:
+        return ''
+
     clauses = []
     for clause in re.split(r'[，,。；;！!？?]', text):
         clause = clause.strip()
         if not clause or _SMALLTALK.match(clause) or _SMALLTALK_CLAUSE.search(clause):
             continue
-        clauses.append(_normalize_person(clause))
+        clauses.append(_spoken_to_written(_normalize_person(clause)))
     if not clauses:
         return ''
-    merged = '，'.join(clause for clause in clauses if clause)
-    if not merged:
-        return ''
-    if len(merged) > MINUTES_ITEM_MAX_CHARS - 15:
-        merged = merged[:MINUTES_ITEM_MAX_CHARS - 16]
-        merged = merged.rstrip('，,、') + '等'
+
+    # 「今天我方开第四季度项目推进会」→「本次会议召开第四季度项目推进会」
+    clauses[0] = re.sub(r'^(今天|这次|本次)?我方(开|召开|组织)(?=[^，。]{2,})',
+                        '本次会议召开', clauses[0])
+
+    # 按分句累加，超过长度上限就停（在分句边界截断，不切半句）
+    merged = ''
+    for clause in clauses:
+        candidate = f'{merged}，{clause}' if merged else clause
+        if len(candidate) > BULLET_MAX_CHARS and merged:
+            break
+        merged = candidate
+    if len(merged) > BULLET_MAX_CHARS:
+        merged = merged[:BULLET_MAX_CHARS].rstrip('，,、') + '等'
     return merged
 
 
-# few-shot：1.5B 的模型光靠规则描述容易写成「第三人称流水账」，
-# 给一条示例最能约束成公文风格（实测加了示例后才稳定带引导语）
-MINUTES_SYSTEM_PROMPT = (
-    '你是公文写作助手，负责把会议发言整理成《会议纪要》正文。\n'
-    '要求：\n'
-    '1. 用第三人称、公文体，把口语改写成规范语，不得逐字照抄原话；\n'
-    '2. 每条以规范引导语开头，可选：会议听取了、会议讨论了、会议认为、'
-    '会议指出、会议明确、会议强调、会议要求；\n'
-    '3. 只归纳发言中确实出现的内容，不得添加原文没有的信息、数字或结论；\n'
-    '4. 共 4~8 条，每条 20~60 字，一条一行，用「1. 2. 3.」编号；\n'
-    '5. 只输出条目，不要标题、不要解释、不要加粗或其它格式符号。\n'
-    '示例：\n'
-    '1. 会议听取了销售人员关于理财产品推荐情况的说明。\n'
-    '2. 会议认为，向客户推介产品时应如实说明风险等级与投资限制。\n'
-    '3. 会议强调，业绩提醒义务必须落实，过往业绩不代表未来表现。\n'
-    '4. 会议要求，相关材料需在会后补充完善并留档备查。'
-)
-
-
-def _minutes_item(text, leadin):
-    """把一句归纳后的内容包装成纪要条目。"""
-    body = _clean_spoken(text).strip('。；; ')
-    if not body:
-        return None
-    if not body.endswith(('。', '！', '？')):
-        body += '。'
-    return f'{leadin}，{body}' if not body.startswith(leadin) else body
-
-
-def _keyword_text(value):
-    """关键词可能是 {'word': ...} 字典、字符串或其它类型，统一取文本。"""
-    if isinstance(value, dict):
-        return str(value.get('word') or value.get('text') or '').strip()
-    return str(value or '').strip()
-
-
-def _keyword_texts(values):
-    return [text for text in (_keyword_text(v) for v in (values or [])) if text]
-
-
-def _distill_with_rules(text, sentences, decisions, actions, keywords):
-    """
-    不依赖大模型的兜底归纳：抽取关键句 → 压掉客套与语气词 → 去重 → 套上公文引导语。
-
-    效果不如大模型（它能把「他说明天把材料送过来」改成「会议要求及时提交材料」），
-    但至少不是把逐字发言抄进纪要：客套话整句删掉，句子按分句压缩。
-    """
-    picks = []
-    # 关键句里通常混着寒暄，先压缩再用
-    key_sentences = extract_key_sentences_from_list(list(sentences or []),
-                                                   top_n=MINUTES_MAX_ITEMS * 3)
-    leadins = ('会议听取了', '会议认为', '会议指出', '会议强调', '会议明确')
-    index = 0
-    for sentence in key_sentences:
-        if len(picks) >= MINUTES_MAX_ITEMS - 1:
-            break
-        condensed = _condense(sentence)
-        if len(condensed) < MINUTES_ITEM_MIN_CHARS:
-            continue
-        if any(_sentence_similarity(condensed, existing) > 0.5 for _, existing in picks):
-            continue
-        picks.append((leadins[index % len(leadins)], condensed))
-        index += 1
-
-    if not picks:
-        # 关键句全被压掉了：退回「有效分句的摘要式拼接」
-        fallback = _coverage_digest('。'.join(sentences or []), sentences, limit=200)
-        condensed = _condense(fallback)
-        if condensed:
-            picks.append(('会议听取了', condensed))
-
-    items = []
-    for leadin, body in picks:
-        item = _minutes_item(body, leadin)
-        if item:
-            items.append(item)
-    if keywords:
-        keyword_texts = _keyword_texts(keywords)
-        if keyword_texts:
-            items.append('会议涉及的关键内容：' + '、'.join(keyword_texts[:8]) + '。')
-    return _apply_leadins(items) if items else None
-
-
-# 没有用引导语开头的条目，按顺序补一个（公文体要求每条都有引导语）
-_LEADIN_ROTATION = ('会议听取了', '会议认为', '会议指出', '会议强调', '会议明确', '会议讨论了')
-
-
-def _apply_leadins(items):
-    """把条目整理成「编号 + 引导语 + 内容」的公文格式。"""
-    result = []
-    used = 0
-    for item in items:
-        body = re.sub(r'^\d+[.、)]\s*', '', item).strip()
-        if not body:
-            continue
-        if any(body.startswith(lead) for lead in MINUTES_LEADINS):
-            leadin = next(lead for lead in MINUTES_LEADINS if body.startswith(lead))
-            body = body[len(leadin):].lstrip('，,：: ')
-        else:
-            leadin = _LEADIN_ROTATION[used % len(_LEADIN_ROTATION)]
-        used += 1
-        if not body.endswith(('。', '！', '？')):
-            body += '。'
-        result.append(f'{len(result) + 1}. {leadin}，{body}')
-    return result
-
-
-def _minutes_candidates(text, sentences, keywords):
+def _minutes_candidates(text, sentences):
     """
     先用规则挑出「哪些句子值得进纪要」，作为改写对象。
 
@@ -448,8 +450,10 @@ def _minutes_candidates(text, sentences, keywords):
     key_sentences = extract_key_sentences_from_list(list(sentences or []),
                                                    top_n=MINUTES_MAX_ITEMS * 3)
     for sentence in key_sentences:
-        if len(picks) >= MINUTES_MAX_ITEMS - 1:
+        if len(picks) >= MINUTES_MAX_ITEMS:
             break
+        if _QUESTION.search(sentence or ''):
+            continue
         condensed = _condense(sentence)
         if len(condensed) < MINUTES_ITEM_MIN_CHARS:
             continue
@@ -462,32 +466,28 @@ def _minutes_candidates(text, sentences, keywords):
         condensed = _condense(fallback)
         if condensed:
             picks.append(('会议听取了', condensed))
-
-    keyword_texts = _keyword_texts(keywords)
-    if keyword_texts:
-        picks.append(('会议明确', '涉及的关键内容：' + '、'.join(keyword_texts[:8])))
     return picks
 
 
 # 让模型只做「口语 → 规范语」的逐条改写（条数由规则侧给定，模型不负责取舍）
 MINUTES_REWRITE_PROMPT = (
-    '你是公文写作助手。请把下面每条会议发言改写成《会议纪要》的规范表述。\n'
+    '你是会议纪要助手。请把下面每条会议发言改写成会议纪要里的**要点**，风格参考飞书妙记：\n'
     '要求：\n'
     '1. 逐条改写，条数与输入完全相同，不合并、不拆分、不新增、不遗漏；\n'
-    '2. 用第三人称、公文体，删掉寒暄客套与口头禅，保留事实（人名、单位、产品、时间、数字）；\n'
-    '3. 每条一行，以「会议听取了，」「会议认为，」「会议指出，」「会议强调，」'
-    '「会议明确，」开头，按顺序轮换；\n'
-    '4. 每条不超过 60 字；不得添加输入里没有的信息；\n'
-    '5. 只输出改写后的条目，每行一条，不要编号、不要标题、不要解释。\n'
+    '2. 每条是一个**要点短语或短句**（15~40 字），删掉寒暄客套、口头禅和重复信息；\n'
+    '3. 用第三人称陈述事实与结论，保留人名、单位、产品、时间、数字等事实；\n'
+    '4. 不要以「会议听取了」「会议认为」等套话开头，直接写要点；\n'
+    '5. 不得添加输入里没有的信息；\n'
+    '6. 只输出改写后的条目，每行一条，不要编号、不要标题、不要解释。\n'
     '示例：\n'
     '输入：\n'
     '1. 唉，李总你好，我是中国人寿的小王，之前王总给我推荐联系您。\n'
     '2. 他之前在我这边配置了全家医疗险和重疾险，觉得方案比较实在。\n'
     '3. 我也想跟您对接一下，给您做一份免费的家庭保单体检。\n'
     '输出：\n'
-    '会议听取了，中国人寿小王经王总推荐与对方对接。\n'
-    '会议认为，对方此前已配置全家医疗险与重疾险，方案较符合其需求。\n'
-    '会议明确，将提供一份免费的家庭保单体检服务。'
+    '中国人寿小王经王总推荐与客户对接\n'
+    '客户此前已配置全家医疗险与重疾险，方案认可度较高\n'
+    '拟提供一次免费家庭保单体检服务'
 )
 
 
@@ -593,12 +593,12 @@ def distill_minutes(text, language='zh', decisions=None, actions=None,
 
     实现分两层，保证「有模型更好、没模型也能用」：
       1. 规则层：按关键句挑出该进纪要的句子，并压掉寒暄客套与口头禅；
-      2. 模型层：把规则挑出的句子逐条改写成公文表述（条数不变，模型只负责措辞），
+      2. 模型层：把规则挑出的句子逐条改写成「要点短语」（条数不变，模型只负责措辞），
          每条都要过「与原文内容词重合度」的保真校验，改跑的条目退回规则文本。
     use_model=False 时只走规则层（批量补生成历史文档时用，几毫秒一场）。
 
     Returns:
-        条目列表（如 ['1. 会议听取了，……', ...]）；完全无法归纳时返回 None。
+        要点列表（如 ['中国人寿小王经王总推荐与客户对接', ...]）；无法归纳时返回 None。
     """
     text = (text or '').strip()
     if len(text) < 20:
@@ -608,18 +608,17 @@ def distill_minutes(text, language='zh', decisions=None, actions=None,
         use_model = text_models_enabled()
 
     sentences = _smart_segment(text)
-    pairs = _minutes_candidates(text, sentences, keywords)
+    pairs = _minutes_candidates(text, sentences)
     if not pairs:
         return None
 
     bodies = _rewrite_candidates_with_model(pairs) if use_model else None
 
-    items = []
-    for index, (leadin, source_body) in enumerate(pairs):
+    bullets = []
+    for index, (_leadin, source_body) in enumerate(pairs):
         body = None
         if bodies and index < len(bodies) and bodies[index]:
             body = bodies[index]
-            # 模型可能自带引导语，去掉后统一按条加，格式才一致
             for lead in MINUTES_LEADINS:
                 if body.startswith(lead):
                     body = body[len(lead):].lstrip('，,：: ')
@@ -629,17 +628,15 @@ def distill_minutes(text, language='zh', decisions=None, actions=None,
         body = body.strip().strip('。；; ')
         if not body:
             continue
-        if not body.endswith(('。', '！', '？')):
-            body += '。'
         if len(body) > MINUTES_ITEM_MAX_CHARS:
-            body = body[:MINUTES_ITEM_MAX_CHARS - 1] + '。'
-        items.append(f'{len(items) + 1}. {leadin}，{body}')
+            body = body[:MINUTES_ITEM_MAX_CHARS - 1] + '…'
+        bullets.append(body)
 
-    if not items:
+    if not bullets:
         return None
     used_model = sum(1 for item in (bodies or []) if item)
-    print(f'[纪要] 归纳出 {len(items)} 条（其中模型改写 {used_model} 条）')
-    return items
+    print(f'[纪要] 归纳出 {len(bullets)} 条要点（其中模型改写 {used_model} 条）')
+    return bullets
 
 
 # 实体覆盖判据的样本量下限与阈值。
