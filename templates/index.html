@@ -831,11 +831,17 @@
             const state = docPreviewState;
             const kind = state.order[state.index];
             const content = state.contents[kind] || '';
+            // 标题用文档里的 H1（如「未命名会议 · 会议纪要」），一眼能看出这是什么文书；
+            // 预览容器是复用的，切换/重复打开时必须回到顶部，否则标题与会议信息表
+            // 会被上一次的滚动位置挡在外面
+            const heading = content.replace(/^\uFEFF/, '').match(/^#\s+(.+)$/m);
             document.getElementById('doc-preview-title').textContent =
-                `${DOC_KIND_LABEL[kind] || kind} · 预览`;
+                heading ? `${heading[1]} · 预览` : `${DOC_KIND_LABEL[kind] || kind} · 预览`;
             document.getElementById('doc-preview-path').textContent =
                 `本地路径（可直接在资源管理器打开）：${state.directory}`;
-            document.getElementById('doc-preview-body').innerHTML = renderMarkdown(content);
+            const body = document.getElementById('doc-preview-body');
+            body.innerHTML = renderMarkdown(content);
+            body.scrollTop = 0;
             document.getElementById('doc-preview-switch').style.display =
                 state.order.length > 1 ? '' : 'none';
         }
