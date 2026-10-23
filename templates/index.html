@@ -299,12 +299,14 @@
 
         <div class="tab-content" id="documents">
             <div class="card">
-                <div class="card-title">📄 会议文档（会议纪要 / 会议记录概要）</div>
+                <div class="card-title">📄 会议文档（会议纪要 / 会议记录概要 / 会议记录全文）</div>
                 <p style="color:#666; font-size:13px; margin-bottom:12px;">
-                    每场会议自动生成两份文件，按「日期」分月归档在项目目录
+                    每场会议自动生成三份文件，按「日期」分月归档在项目目录
                     <code>records/&lt;年-月&gt;/&lt;日期_标题_会议id&gt;/</code> 下：
-                    会议纪要.md（正式纪要，含讨论内容、决议、待办、合规提示与转写全文）与
-                    会议记录概要.md（一页速览）。下面按月份列出，可直接下载查看。
+                    会议纪要.md（信息表 + 摘要 + 讨论要点 + 决议 + 待办表格 + 合规提示）、
+                    会议记录概要.md（一页速览）与会议记录全文.md（逐字转写）。
+                    下面是全部会议，可按月份查看；每份文件都能预览，下载时可选 Word / PDF / Markdown / 纯文本。
+                    静音或损坏的音频也会生成一份写明原因的纪要。
                 </p>
                 <div style="display:flex; gap:8px; margin-bottom:12px;">
                     <button class="btn btn-secondary" onclick="loadMeetingDocuments()">刷新列表</button>
@@ -1907,36 +1909,40 @@
         }
 
         async function loadKnowledgeList() {
-            // page_size=100：不传的话后端默认只返回 10 条，条目一多就会「消失」
-            const response = await fetch(`${API_BASE}/knowledge-base?page_size=100`);
-            const result = await response.json();
-            const items = result.data || [];
-
             const tbody = document.getElementById('knowledge-list');
-            if (items.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" style="color:#999;">暂无知识库条目</td></tr>';
-                return;
-            }
-            tbody.innerHTML = items.map(item => `
-                <tr>
-                    <td>${item.id}</td>
-                    <td>${item.title}</td>
-                    <td>${getTypeName(item.item_type)}</td>
-                    <td>${(item.keywords || []).slice(0, 3).join(', ')}</td>
-                    <td>${(item.required_points || []).slice(0, 3).join(', ')}</td>
-                    <td>${item.status === 'active' ? '启用' : '禁用'}</td>
-                    <td>
-                        <div class="actions">
-                            <button class="btn btn-secondary" onclick="editKnowledge(${item.id})">编辑</button>
-                            <button class="btn btn-danger" onclick="deleteKnowledge(${item.id})">删除</button>
-                        </div>
-                    </td>
-                </tr>
-            `).join('');
+            try {
+                // page_size=100：不传的话后端默认只返回 10 条，条目一多就会「消失」
+                const response = await fetch(`${API_BASE}/knowledge-base?page_size=100`);
+                const result = await response.json();
+                const items = result.data || [];
 
-            const totalEl = document.getElementById('kb-total');
-            if (totalEl && typeof result.total === 'number') {
-                totalEl.textContent = `共 ${result.total} 条`;
+                if (items.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="color:#999;">暂无知识库条目</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = items.map(item => `
+                    <tr>
+                        <td>${item.id}</td>
+                        <td>${item.title}</td>
+                        <td>${getTypeName(item.item_type)}</td>
+                        <td>${(item.keywords || []).slice(0, 3).join(', ')}</td>
+                        <td>${(item.required_points || []).slice(0, 3).join(', ')}</td>
+                        <td>${item.status === 'active' ? '启用' : '禁用'}</td>
+                        <td>
+                            <div class="actions">
+                                <button class="btn btn-secondary" onclick="editKnowledge(${item.id})">编辑</button>
+                                <button class="btn btn-danger" onclick="deleteKnowledge(${item.id})">删除</button>
+                            </div>
+                        </td>
+                    </tr>
+                `).join('');
+
+                const totalEl = document.getElementById('kb-total');
+                if (totalEl && typeof result.total === 'number') {
+                    totalEl.textContent = `共 ${result.total} 条`;
+                }
+            } catch (error) {
+                tbody.innerHTML = `<tr><td colspan="7" style="color:#ff4d4f;">加载失败：${escapeHtml(error.message || error)}。请确认后端服务已启动（控制台窗口不要关闭）。</td></tr>`;
             }
         }
 
@@ -2029,53 +2035,60 @@
         }
 
         async function loadReports() {
-            // page_size=100 + include_compliance=1：
-            //   不传 page_size 只会统计最近 10 场；不传 include_compliance 则拿不到
-            //   遗漏要点/风险内容（这些只在合规报告里，会议列表默认不返回）。
-            const response = await fetch(`${API_BASE}/meetings?page_size=100&include_compliance=1`);
-            const result = await response.json();
-            const meetings = result.data || [];
-
-            let excellent = 0, good = 0, pass = 0, fail = 0;
-            const rows = [];
-
-            meetings.forEach(m => {
-                // 只有出了评分的会议才计入统计（0 分与「未评分」要区分：
-                // 后端用 None 表示未评分，用 0 表示确实得了 0 分）
-                if (m.total_score === null || m.total_score === undefined) return;
-                if (m.total_score >= 90) excellent++;
-                else if (m.total_score >= 75) good++;
-                else if (m.total_score >= 60) pass++;
-                else fail++;
-
-                const summary = m.compliance_summary || {};
-                rows.push(`
-                    <tr>
-                        <td>${m.id}</td>
-                        <td>${m.title}</td>
-                        <td><span class="score-badge score-${getScoreClass(m.score_level)}">${m.total_score}</span></td>
-                        <td>${m.score_level || '--'}</td>
-                        <td>${summary.missing_points_count ?? '--'}</td>
-                        <td>${summary.risk_keywords_count ?? '--'}</td>
-                        <td>${summary.first_suggestion || '--'}</td>
-                        <td>${new Date(m.created_at).toLocaleString()}</td>
-                        <td><button class="btn btn-primary btn-sm" onclick="viewMeeting(${m.id})">查看详情</button></td>
-                    </tr>
-                `);
-            });
-
             const tbody = document.getElementById('report-list');
-            tbody.innerHTML = rows.length ? rows.join('')
-                : '<tr><td colspan="9" style="color:#999;">暂无已评分的会议</td></tr>';
+            try {
+                // page_size=100 + include_compliance=1：
+                //   不传 page_size 只会统计最近 10 场；不传 include_compliance 则拿不到
+                //   遗漏要点/风险内容（这些只在合规报告里，会议列表默认不返回）。
+                const response = await fetch(`${API_BASE}/meetings?page_size=100&include_compliance=1`);
+                const result = await response.json();
+                const meetings = result.data || [];
 
-            document.getElementById('stat-excellent').textContent = excellent;
-            document.getElementById('stat-good').textContent = good;
-            document.getElementById('stat-pass').textContent = pass;
-            document.getElementById('stat-fail').textContent = fail;
+                let excellent = 0, good = 0, pass = 0, fail = 0;
+                const rows = [];
 
-            const totalEl = document.getElementById('report-total');
-            if (totalEl) {
-                totalEl.textContent = `共 ${result.total ?? meetings.length} 场会议，已评分 ${rows.length} 场`;
+                meetings.forEach(m => {
+                    // 只有出了评分的会议才计入统计（0 分与「未评分」要区分：
+                    // 后端用 None 表示未评分，用 0 表示确实得了 0 分）
+                    if (m.total_score === null || m.total_score === undefined) return;
+                    if (m.total_score >= 90) excellent++;
+                    else if (m.total_score >= 75) good++;
+                    else if (m.total_score >= 60) pass++;
+                    else fail++;
+
+                    const summary = m.compliance_summary || {};
+                    rows.push(`
+                        <tr>
+                            <td>${m.id}</td>
+                            <td>${m.title}</td>
+                            <td><span class="score-badge score-${getScoreClass(m.score_level)}">${m.total_score}</span></td>
+                            <td>${m.score_level || '--'}</td>
+                            <td>${summary.missing_points_count ?? '--'}</td>
+                            <td>${summary.risk_keywords_count ?? '--'}</td>
+                            <td>${summary.first_suggestion || '--'}</td>
+                            <td>${new Date(m.created_at).toLocaleString()}</td>
+                            <td><button class="btn btn-primary btn-sm" onclick="viewMeeting(${m.id})">查看详情</button></td>
+                        </tr>
+                    `);
+                });
+
+                tbody.innerHTML = rows.length ? rows.join('')
+                    : '<tr><td colspan="9" style="color:#999;">暂无已评分的会议</td></tr>';
+
+                document.getElementById('stat-excellent').textContent = excellent;
+                document.getElementById('stat-good').textContent = good;
+                document.getElementById('stat-pass').textContent = pass;
+                document.getElementById('stat-fail').textContent = fail;
+
+                const totalEl = document.getElementById('report-total');
+                if (totalEl) {
+                    totalEl.textContent = `共 ${result.total ?? meetings.length} 场会议，已评分 ${rows.length} 场`;
+                }
+            } catch (error) {
+                tbody.innerHTML = `<tr><td colspan="9" style="color:#ff4d4f;">加载失败：${escapeHtml(error.message || error)}。请确认后端服务已启动（控制台窗口不要关闭）。</td></tr>`;
+                ['stat-excellent', 'stat-good', 'stat-pass', 'stat-fail'].forEach((id) => {
+                    document.getElementById(id).textContent = '—';
+                });
             }
         }
 
