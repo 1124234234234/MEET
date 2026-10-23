@@ -1,0 +1,26 @@
+会议室智能合规分析系统 · 部署先读我
+==================================
+
+这是一个 Windows 桌面/内网应用，纯 CPU 运行，运行期不需要联网。
+
+四步启动：
+
+1) 安装 Python 3.10 或更高版本
+   https://www.python.org/downloads/
+   安装时务必勾选 "Add Python to PATH"。
+
+2) 安装依赖（在本目录打开命令行）
+   python -m pip install -r requirements.txt
+
+3) 准备模型（约 5GB，二选一）
+   A. 把原项目 models\ 目录下的内容复制到本目录的 models\ 下
+   B. 本机能上网时运行：python tools\download_models.py
+   检查：python tools\download_models.py --check
+
+4) 双击 启动.bat
+   浏览器会自动打开 http://127.0.0.1:5001
+   端口被占用会自动顺延，以控制台打印的地址为准。
+
+详细说明见 部署说明.md；功能使用见 安装和使用说明.md。
+部署到服务器或局域网时，先设置 HOST=0.0.0.0 再启动。
+系统没有登录鉴权，只应部署在可信内网，不要直接暴露到公网。

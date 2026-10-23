@@ -560,22 +560,81 @@ def test_page_document_wiring():
         record(f'页面定义 {func}', f'function {func}(' in source)
 
 
+def _ensure_fixture_meeting():
+    """空库（刚部署、还没上传过音频）时造一场带转写的会议，供接口测试使用。
+
+    返回创建出来的会议 id；库里已有会议时返回 None，不动用户数据。
+    """
+    from app import app
+    from database import db
+    from models import Meeting, Transcription
+
+    with app.app_context():
+        existing = (Meeting.query.join(Transcription,
+                                       Transcription.meeting_id == Meeting.id).first())
+        if existing:
+            return None
+        meeting = Meeting(title='文档接口测试会议', date=datetime.now(),
+                          status='finished', duration=12,
+                          summary='这是用于接口测试的会议摘要。')
+        db.session.add(meeting)
+        db.session.commit()
+        for segment in SEGMENTS:
+            db.session.add(Transcription(
+                meeting_id=meeting.id,
+                speaker=segment['speaker'],
+                text=segment['text'],
+                start_time=segment['start_time'],
+                end_time=segment['end_time'],
+                confidence=1.0,
+                language='zh',
+            ))
+        db.session.commit()
+        return meeting.id
+
+
+def _drop_fixture_meeting(meeting_id):
+    if not meeting_id:
+        return
+    from app import app
+    from database import db
+    from models import ComplianceReport, Meeting, Transcription
+
+    directory = None
+    with app.app_context():
+        meeting = Meeting.query.get(meeting_id)
+        if meeting:
+            directory = meeting.documents_dir
+            Transcription.query.filter_by(meeting_id=meeting_id).delete()
+            ComplianceReport.query.filter_by(meeting_id=meeting_id).delete()
+            db.session.delete(meeting)
+            db.session.commit()
+    if directory:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 def main():
     print('=' * 68)
     print('会议文档生成测试')
     print('=' * 68)
-    for func in (test_page_document_wiring, test_distilled_body_in_minutes,
-                 test_empty_audio_still_has_minutes, test_empty_meeting_documents_api,
-                 test_basic_generation,
-                 test_missing_public_fields, test_filename_safety,
-                 test_describe_and_regenerate, test_api_endpoints, test_export_formats,
-                 test_update_public_fields, test_save_meeting_writes_documents):
-        try:
-            func()
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            record(func.__name__, False, f'异常: {exc}')
+    fixture_id = _ensure_fixture_meeting()
+    if fixture_id:
+        print(f'  [info] 空库，已创建测试会议 id={fixture_id}')
+    try:
+        for func in (test_page_document_wiring, test_distilled_body_in_minutes,
+                     test_empty_audio_still_has_minutes, test_empty_meeting_documents_api,
+                     test_basic_generation,
+                     test_missing_public_fields, test_filename_safety,
+                     test_describe_and_regenerate, test_api_endpoints, test_export_formats,
+                     test_update_public_fields, test_save_meeting_writes_documents):
+            try:
+                func()
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                record(func.__name__, False, f'异常: {exc}')
+    finally:
+        _drop_fixture_meeting(fixture_id)
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     print('\n' + '=' * 68)

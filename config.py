@@ -16,6 +16,10 @@ class Config:
     
     DATA_FOLDER = os.path.join(BASE_DIR, 'data')
     UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+    # 首次部署时这两个目录还不存在：SQLite 不会自己建父目录，
+    # 上传接口虽会 makedirs，但库连接在更早的启动阶段就要用到 data/
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a', 'webm', 'mp4', 'aac'}
     
     WHISPER_MODEL = os.environ.get('WHISPER_MODEL') or 'medium'

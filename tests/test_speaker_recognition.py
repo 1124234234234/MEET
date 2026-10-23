@@ -15,6 +15,7 @@
 
 运行：python tests/test_speaker_recognition.py
 """
+import glob
 import json
 import os
 import sys
@@ -25,6 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUDIO_DIR = os.path.join(BASE_DIR, 'tests', 'test_audio_files')
+# 真实通话录音（含个人信息）不随代码分发。需要做这项回归时，把 1~N 段
+# 单侧通话录音放进这个目录即可，测试会自动把它们当作「应判为 1 人」的样本。
+PRIVATE_AUDIO_DIR = os.path.join(BASE_DIR, 'tests', 'private_audio')
 
 CONFUSION_TARGET = 0.05
 RESULTS = []
@@ -46,12 +50,18 @@ def test_speaker_counts():
     cases = [
         ('gt_meeting.wav', 3, '合成 3 人会议'),
         ('gt_2spk.wav', 2, '合成 2 人对话'),
-        (os.path.join(BASE_DIR, '民族大道辅路.m4a'), 1, '真实单侧通话 1'),
-        (os.path.join(BASE_DIR, '民族大道辅路 2.m4a'), 1, '真实单侧通话 2'),
     ]
+    for path in sorted(glob.glob(os.path.join(
+            PRIVATE_AUDIO_DIR, '*.m4a')) + glob.glob(os.path.join(
+            PRIVATE_AUDIO_DIR, '*.wav')) + glob.glob(os.path.join(
+            PRIVATE_AUDIO_DIR, '*.mp3'))):
+        cases.append((path, 1, f'真实单侧通话 {os.path.basename(path)}'))
     for filename, expected, label in cases:
         path = filename if os.path.isabs(filename) else os.path.join(AUDIO_DIR, filename)
         if not os.path.exists(path):
+            if os.path.isabs(filename):
+                print(f'  [SKIP] {label}（未提供真实录音样本）')
+                continue
             record(f'{label} 人数', False, f'缺少音频 {os.path.basename(path)}')
             continue
         try:
@@ -226,10 +236,9 @@ def test_pitch_split():
     """
     同一声线变调合成的多人音频：音高三维峰要能拆出三个人，真单人不能拆。
 
-    背景：用户给的测试音频（D:\\games\\新建文件夹 (7)\\meeting_sample.wav，3 个角色）
-    是同一台 SAPI 中文声线 + 变调 0.82/1.12/1.32 合成的，音色几乎一样，MFCC 只分得
-    出 1 个人；但基频被整体平移，音高分布是 3 个隔开 3~5 个半音的峰。这里用纯音
-    序列复现两种情形（不依赖那份 8MB 录音）：
+    背景：现场测试用的是一段 3 人同声线变调音频（同一台 SAPI 中文声线 + 变调
+    0.82/1.12/1.32 合成），音色几乎一样，MFCC 只分得出 1 个人；但基频被整体平移，
+    音高分布是 3 个隔开 3~5 个半音的峰。这里用纯音序列复现两种情形（不依赖那段录音）：
       - 三段不同频率交替出现 → 应拆成 3 人
       - 单一频率 / 连续滑音（真人语调）→ 不应拆
     """
